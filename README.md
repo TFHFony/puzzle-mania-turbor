@@ -6,8 +6,8 @@ Keyboard only. Freeware. Contains nudity (18+). The manual of the MSX1/2 version
 
 ## Release
 
-The ROM is attached to the [release](../../releases), it is not in the repository: `PuzzleManiaXXXL-Turbo[NEO16].rom`, 128 MB, NEO16 mapper.
-openMSX: `openmsx -machine Panasonic_FS-A1ST -cart "PuzzleManiaXXXL-Turbo[NEO16].rom" -romtype NEO-16`
+The ROM is attached to the [release](../../releases), it is not in the repository: `PuzzleManiaXXXL-Turbo_NEO16.rom`, 128 MB, NEO16 mapper.
+openMSX: `openmsx -machine Panasonic_FS-A1ST -cart "PuzzleManiaXXXL-Turbo_NEO16.rom" -romtype NEO-16`
 
 ## Build
 
