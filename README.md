@@ -22,7 +22,7 @@ python tools/encode_clips.py --fast          # reward videos for the turbo R pla
 python turbor/clipenc.py                      # palette per scene, packed frames (work/mq_clipNN_bytes.npz)
 FILM=1 TITLEVID=1 CLIPFRAMES=0 python turbor/build_m7.py      # -> PM_turboR_M7.rom (128 MB)
 ```
-Needs Python 3 (numpy, scipy, pillow), ffmpeg and [sjasmplus](https://github.com/z00m128/sjasmplus). `clipenc.py` also uses `msx1_video.py` and `s4_lab.py` of
+Needs Python 3 (numpy, scipy, pillow), ffmpeg and [sjasmplus](https://github.com/z00m128/sjasmplus). `clipenc.py` also uses `msx1_video.py` and `s4_lab.py` (in its `tools/`) of
 [msx1-video-player](https://github.com/TFHFony/msx1-video-player). The encoders cache their results in `work/` (the first complete build takes hours, a build with warm caches about a minute).
 `CLIPFRAMES=60` builds a small development ROM.
 
