@@ -1,0 +1,607 @@
+
+;;MEM
+; ================================================================================================ the choice screen and the memory game
+m_pic   equ GV + 120                    ; 20 places: the photo of the card
+m_st    equ GV + 140                    ; 0 face down, 1 turned (waiting for the second), 2 found
+m_cur   equ GV + 160
+m_f1    equ GV + 161
+m_f2    equ GV + 162
+m_pairs equ GV + 163
+m_moves equ GV + 164
+m_wait  equ GV + 166                    ; sample count at which the two cards turn back (0 = none)
+m_last  equ GV + 168
+m_ch    equ GV + 169                    ; the choice: 0 sliding, 1 memory
+g_after equ GV + 170                    ; where to go after the clip: 0 photo menu, 1 choice screen
+m_i     equ GV + 171
+m_k     equ GV + 172
+
+; setpixw: E = x, HL = y (0..511) -> e_buf + 7..9
+setpixw: ld a,h
+        add a,a
+        add a,a
+        ld b,a
+        ld a,l
+        rlca
+        rlca
+        and 3
+        or b
+        ld (e_buf + 7),a
+        ld a,l
+        and 63
+        or 0x40
+        ld (e_buf + 9),a
+        ld a,e
+        ld (e_buf + 8),a
+        ret
+
+; ---- the choice screen like the original: CHOOSE YOUR PUZZLE, a photo (SLIDING) and the card back (MEMORY), the footer, the corner cursor
+choice_enter:
+        call curs_off
+        call rnd_seed
+        ld a,3
+        ld (g_mode),a
+        call mus_menu
+        call att_init
+        xor a
+        ld (g_after),a
+        ld c,2
+        ld a,0x1F
+        call setreg
+        call clearscr
+        call logo
+        call footer
+        ld hl,s_chc
+        ld e,56
+        ld d,58
+        call prtstr
+        call rnd                        ; the picture of the sliding puzzle: a photo at random
+        call mod12
+        ld e,24
+        ld d,74
+        call mthumb
+        ld hl,CHOICEB
+        ld (e_buf + 1),hl
+        ld hl,0x4000
+        ld (e_buf + 3),hl
+        ld hl,80 * 256 + 104
+        ld (e_buf + 5),hl
+        ld a,2
+        ld (e_buf),a
+        ld e,128
+        ld d,74
+        call setpix
+        ld hl,e_buf
+        call q_put
+        ld hl,s_ch1
+        ld e,48
+        ld d,162
+        call prtstr
+        ld hl,s_ch2
+        ld e,152
+        ld d,162
+        call prtstr
+        call curs_on
+        jp choice_frame
+s_chc:  db "CHOOSE YOUR PUZZLE",0
+s_ch1:  db "SLIDING",0
+s_ch2:  db "MEMORY",0
+choice_frame:
+        ld a,(m_ch)
+        or a
+        ld a,24
+        jr z,.x
+        ld a,128
+.x:     ld (g_cbx),a
+        ld a,74
+        ld (g_cby),a
+        ld a,104
+        ld (g_cbw),a
+        ld a,80
+        ld (g_cbh),a
+        ld a,(m_ch)
+        or a
+        ld a,0
+        jr z,.c
+        ld a,8
+.c:     ld (g_cc),a
+        xor a
+        ld (g_cb),a
+        call curs_pos
+        ld a,(g_cc)
+        or a
+        jr nz,.f
+        ld a,11
+.f:     jp curs_col
+
+choice_keys:                            ; D = new presses row 8
+        bit 0,d
+        jr nz,.go
+        ld a,d
+        and 0x90                        ; left or right
+        ret z
+        ld a,(m_ch)
+        xor 1
+        ld (m_ch),a
+        jp choice_frame
+.go:    ld a,(m_ch)
+        or a
+        jp z,menu_enter
+        jp memory_enter
+
+; ---- the memory game: the cards in page 1 of the VRAM (a sheet: 6 per row, the back as number 12), the board in page 0
+; card k on the sheet at x = (k mod 6) * 40, y = 256 + (k div 6) * 40
+cardsrc: ld a,(m_k)                     ; -> hm_sx, hm_sy
+        ld b,0
+.d:     cp 6
+        jr c,.e
+        sub 6
+        inc b
+        jr .d
+.e:     ld c,a                          ; the column
+        ld hl,256
+        ld de,40
+        ld a,b
+        or a
+        jr z,.y
+.yl:    add hl,de
+        djnz .yl
+.y:     ld (hm_sy),hl
+        ld hl,0
+        ld a,c
+        or a
+        jr z,.x
+        ld b,a
+.xl:    add hl,de
+        djnz .xl
+.x:     ld (hm_sx),hl
+        ret
+
+; a place (0..19) -> (hm_dx, hm_dy): column = place mod 5, row = place div 5: x = 12 + 48 col, y = 14 + 46 row
+placexy: ld b,0
+.d:     cp 5
+        jr c,.e
+        sub 5
+        inc b
+        jr .d
+.e:     ld c,b                          ; row
+        ld hl,12
+        ld de,48
+        or a
+        jr z,.cx
+        ld b,a
+.xl:    add hl,de
+        djnz .xl
+.cx:    ld (hm_dx),hl
+        ld hl,14
+        ld de,46
+        ld a,c
+        or a
+        jr z,.cy
+        ld b,a
+.yl:    add hl,de
+        djnz .yl
+.cy:    ld (hm_dy),hl
+        ret
+
+; drawcard: A = place, B = 0 back / 1 face
+drawcard:
+        ld c,b
+        ld (m_i),a
+        push bc
+        call placexy
+        pop bc
+        ld a,c
+        or a
+        ld a,12                         ; the back
+        jr z,.k
+        ld a,(m_i)
+        ld e,a
+        ld d,0
+        ld hl,m_pic
+        add hl,de
+        ld a,(hl)
+.k:     ld (m_k),a
+        call cardsrc
+        ld hl,40
+        ld (hm_nx),hl
+        ld (hm_ny),hl
+        ld a,0xD0
+        ld (hm_cmd),a
+        jp cmd_put
+
+memory_enter:
+        call curs_off
+        call rnd_seed
+        call mus_puzzle
+        ld a,4
+        ld (g_mode),a
+        ld a,1
+        ld (g_after),a
+        call clearscr
+        ; the sheet of the cards (13 rect jobs)
+        xor a
+        ld (m_i),a
+.sh:    call tick
+        ld a,(m_i)
+        ld (m_k),a
+        cp 12
+        jr z,.bk
+        ld e,a                          ; bank = CARD0 + k / 10, offset = (k mod 10) * 1600
+        ld d,0
+        ld b,0
+.dv:    cp 10
+        jr c,.dd
+        sub 10
+        inc b
+        jr .dv
+.dd:    ld c,a
+        ld hl,CARD0
+        ld a,b
+        ld e,a
+        ld d,0
+        add hl,de
+        ld (e_buf + 1),hl
+        ld hl,0x4000
+        ld a,c
+        or a
+        jr z,.of
+        ld b,a
+        ld de,1600
+.ol:    add hl,de
+        djnz .ol
+.of:    ld (e_buf + 3),hl
+        jr .rj
+.bk:    ld hl,CARD0 + 2
+        ld (e_buf + 1),hl
+        ld hl,0x4000
+        ld (e_buf + 3),hl
+.rj:    ld hl,40 * 256 + 40
+        ld (e_buf + 5),hl
+        ld a,2
+        ld (e_buf),a
+        call cardsrc
+        ld hl,(hm_sx)
+        ld e,l
+        ld hl,(hm_sy)
+        call setpixw
+        ld hl,e_buf
+        call q_put
+        ld a,(m_i)
+        inc a
+        ld (m_i),a
+        cp 13
+        jr nz,.sh
+        call mem_deal
+        ld hl,0
+        ld (m_moves),hl
+        ld (m_wait),hl
+        xor a
+        ld (m_pairs),a
+        ld (m_cur),a
+        ld (g_state),a
+        ld a,255
+        ld (m_f1),a
+        ld (m_f2),a
+        xor a
+        ld (m_i),a
+.dc:    call tick
+        ld a,(m_i)
+        ld b,0
+        call drawcard
+        ld a,(m_i)
+        inc a
+        ld (m_i),a
+        cp 20
+        jr nz,.dc
+        call mem_hud
+        jp mem_cursor
+
+; the pairs: ten of the twelve photos, shuffled over twenty places
+mem_deal:
+        ld hl,m_pic
+        ld b,20
+        xor a
+.z:     ld (hl),a
+        inc hl
+        djnz .z
+        ld hl,m_st
+        ld b,20
+.z2:    ld (hl),0
+        inc hl
+        djnz .z2
+        ld hl,GV + 180                  ; the photos in a list of twelve: swap randomly, take ten
+        ld a,0
+.l:     ld (hl),a
+        inc hl
+        inc a
+        cp 12
+        jr nz,.l
+        ld b,40
+.s1:    push bc
+        call rnd
+        call mod12
+        ld c,a
+        call rnd
+        call mod12
+        ld e,a
+        ld d,0
+        ld hl,GV + 180
+        add hl,de
+        push hl
+        ld e,c
+        ld d,0
+        ld hl,GV + 180
+        add hl,de
+        pop de
+        ld a,(hl)
+        ex de,hl
+        ld b,(hl)
+        ld (hl),a
+        ex de,hl
+        ld (hl),b
+        pop bc
+        djnz .s1
+        ld hl,GV + 180                  ; the pairs on the places 0..9 and 10..19
+        ld de,m_pic
+        ld bc,10
+        ldir
+        ld hl,GV + 180
+        ld de,m_pic + 10
+        ld bc,10
+        ldir
+        ld b,100                        ; shuffle the twenty places
+.s2:    push bc
+        call tick
+        call rnd
+        call mod20
+        ld c,a
+        call rnd
+        call mod20
+        ld e,a
+        ld d,0
+        ld hl,m_pic
+        add hl,de
+        push hl
+        ld e,c
+        ld d,0
+        ld hl,m_pic
+        add hl,de
+        pop de
+        ld a,(hl)
+        ex de,hl
+        ld b,(hl)
+        ld (hl),a
+        ex de,hl
+        ld (hl),b
+        pop bc
+        djnz .s2
+        ret
+mod12:  ld b,12
+        jr modn
+mod20:  ld b,20
+modn:   cp b
+        ret c
+        sub b
+        jr modn
+
+mem_hud:
+        ld hl,s_mh
+        ld e,8
+        ld d,2
+        call prtstr
+        ld a,(m_pairs)
+        ld l,a
+        ld h,0
+        call dec5
+        ld hl,d_buf + 3
+        ld e,56
+        ld d,2
+        call prtstr
+        ld hl,(m_moves)
+        call dec5
+        ld hl,d_buf + 2
+        ld e,160
+        ld d,2
+        jp prtstr
+s_mh:   db "PAIRS 00/10  MOVES 000",0
+
+; the cursor frame round a card (m_cur): yellow 0A8h / black 18h in colour A
+mem_cursor:
+        ld a,0xB8
+mem_frame:
+        ld (g_fc),a
+        ld a,(m_cur)
+        call placexy
+        ld hl,(hm_dx)
+        ld de,-4
+        add hl,de
+        ld (g_fx),hl
+        ld hl,(hm_dy)
+        ld de,-4
+        add hl,de
+        ld (g_fy),hl
+        ld hl,(g_fx)                    ; top
+        ld de,(g_fy)
+        ld a,(g_fc)
+        ld b,48
+        ld c,2
+        call fillrect
+        ld hl,(g_fx)                    ; bottom: y + 42 (the card is 40 high, the frame 2 away)
+        ld de,(g_fy)
+        push hl
+        ld hl,46
+        add hl,de
+        ex de,hl
+        pop hl
+        ld a,(g_fc)
+        ld b,48
+        ld c,2
+        call fillrect
+        ld hl,(g_fx)                    ; left
+        ld de,(g_fy)
+        ld a,(g_fc)
+        ld b,2
+        ld c,46
+        call fillrect
+        ld hl,(g_fx)                    ; right: x + 46
+        ld de,46
+        add hl,de
+        ld de,(g_fy)
+        ld a,(g_fc)
+        ld b,2
+        ld c,46
+        jp fillrect
+
+mem_keys:                               ; D = new presses of row 8, E = row 7
+        bit 2,e
+        jp nz,choice_enter
+        ld a,(g_state)
+        or a
+        jr z,.play
+        bit 0,d                         ; solved: SPACE = the reward clip of the last pair
+        ret z
+        ld a,(m_last)
+        jp clip_start
+.play:  ld a,(m_cur)
+        ld c,a
+        bit 7,d
+        jr z,.l
+        inc a                           ; right
+.l:     bit 4,d
+        jr z,.d
+        dec a                           ; left
+.d:     bit 6,d
+        jr z,.u
+        add a,5                         ; down
+.u:     bit 5,d
+        jr z,.w
+        sub 5                           ; up
+.w:     cp 20
+        jr nc,.sp
+        cp c
+        jr z,.sp
+        push af
+        ld a,0x18
+        call mem_frame
+        pop af
+        ld (m_cur),a
+        call mem_cursor
+.sp:    bit 0,d
+        ret z
+        ld a,(m_wait)                   ; (the cards of a wrong pair are still turning back)
+        ld b,a
+        ld a,(m_wait + 1)
+        or b
+        ret nz
+        ld a,(m_cur)
+        ld e,a
+        ld d,0
+        ld hl,m_st
+        add hl,de
+        ld a,(hl)
+        or a
+        ret nz                          ; only a card that is face down
+        ld (hl),1
+        ld a,(m_cur)
+        ld b,1
+        call drawcard
+        ld a,(m_f1)
+        cp 255
+        jr nz,.second
+        ld a,(m_cur)
+        ld (m_f1),a
+        ret
+.second: ld a,(m_cur)
+        ld (m_f2),a
+        ld hl,(m_moves)
+        inc hl
+        ld (m_moves),hl
+        ld a,(m_f1)                     ; the same photo?
+        ld e,a
+        ld d,0
+        ld hl,m_pic
+        add hl,de
+        ld b,(hl)
+        ld a,(m_f2)
+        ld e,a
+        ld hl,m_pic
+        add hl,de
+        ld a,(hl)
+        cp b
+        jr nz,.wrong
+        ld (m_last),a
+        ld a,(m_f1)                     ; a pair: found
+        ld e,a
+        ld d,0
+        ld hl,m_st
+        add hl,de
+        ld (hl),2
+        ld a,(m_f2)
+        ld e,a
+        ld hl,m_st
+        add hl,de
+        ld (hl),2
+        ld a,255
+        ld (m_f1),a
+        ld (m_f2),a
+        ld a,(m_pairs)
+        inc a
+        ld (m_pairs),a
+        call mem_hud
+        ld a,(m_pairs)
+        cp 10
+        ret nz
+        ld a,1
+        ld (g_state),a
+        ld hl,s_msolved
+        ld e,8
+        ld d,200
+        jp prtstr
+.wrong: ld hl,(smp)                     ; both cards turn back after a second
+        ld de,15980
+        add hl,de
+        ld a,h
+        or l
+        jr nz,.nw
+        inc hl
+.nw:    ld (m_wait),hl
+        jp mem_hud
+s_msolved: db "SOLVED!  SPACE = REWARD",0
+
+; the turn-back of a wrong pair (called from the main loop)
+mem_tick:
+        ld hl,(m_wait)
+        ld a,h
+        or l
+        ret z
+        ex de,hl
+        ld hl,(smp)
+        or a
+        sbc hl,de
+        bit 7,h
+        ret nz
+        ld hl,0
+        ld (m_wait),hl
+        ld a,(m_f1)
+        ld e,a
+        ld d,0
+        ld hl,m_st
+        add hl,de
+        ld (hl),0
+        ld a,(m_f1)
+        ld b,0
+        call drawcard
+        ld a,(m_f2)
+        ld e,a
+        ld d,0
+        ld hl,m_st
+        add hl,de
+        ld (hl),0
+        ld a,(m_f2)
+        ld b,0
+        call drawcard
+        ld a,255
+        ld (m_f1),a
+        ld (m_f2),a
+        ret
+;;ENDMEM

@@ -1,0 +1,165 @@
+
+;;PAGES
+; ================================================================================================ the title screen, the help pages and the credits, the joystick, SELECT
+g_pg    equ GV + 200                    ; the page that is shown: 0 / 1 help, 2 credits
+g_ret   equ GV + 201                    ; the screen to go back to (0 photo menu, 3 choice)
+g_r9    equ GV + 202                    ; R#9: 212 lines + the 50 / 60 Hz bit
+
+; the picture of a page (256 x 212 palette pixels) into page 0 of the VRAM: 4 stream jobs from the bank in HL
+streampic:
+        ld (e_buf + 1),hl
+        xor a
+        ld (g_i),a
+.p:     ld a,1
+        ld (e_buf),a
+        ld hl,0x4000
+        ld (e_buf + 3),hl
+        ld hl,16384
+        ld (e_buf + 5),hl
+        ld a,(g_i)
+        ld (e_buf + 7),a                ; R#14 = part: A16 = 0
+        xor a
+        ld (e_buf + 8),a
+        ld a,0x40
+        ld (e_buf + 9),a
+        ld hl,e_buf
+        call q_put
+        ld hl,(e_buf + 1)
+        inc hl
+        ld (e_buf + 1),hl
+        ld a,(g_i)
+        inc a
+        ld (g_i),a
+        cp 4
+        jr nz,.p
+        ret
+
+; page_enter: A = the page (0, 1 help, 2 credits)
+page_enter:
+        push af
+        call curs_off
+        pop af
+        ld (g_pg),a
+        ld a,5
+        ld (g_mode),a
+        ld a,(g_pg)
+        add a,a
+        add a,a
+        ld l,a
+        ld h,0
+        ld de,PAGE0
+        add hl,de
+        jp streampic
+
+page_keys:                              ; D = new presses row 8, E = row 7
+        bit 2,e
+        jr nz,.back
+        bit 0,d
+        ret z
+        ld a,(g_pg)
+        or a
+        jr nz,.back
+        ld a,1                          ; help 1 -> help 2
+        jp page_enter
+.back:  ld a,(g_ret)
+        or a
+        jp z,menu_enter
+        jp choice_enter
+
+help_enter:                             ; from the photo menu (g_ret = 0) or the choice screen (g_ret = 3)
+        ld a,(g_mode)
+        ld c,0
+        cp 3
+        jr nz,.r
+        ld c,3
+.r:     ld a,c
+        ld (g_ret),a
+        xor a
+        jp page_enter
+
+credits_enter:
+        ld a,3
+        ld (g_ret),a
+        ld a,2
+        jp page_enter
+
+; ---- the title screen: a photo with the logo, PRESS SPACE
+title_enter:
+        ld a,6
+        ld (g_mode),a
+        ld hl,FULL0
+        call streampic_photo
+        call logo
+        ld hl,s_ts
+        ld e,72
+        ld d,196
+        call prtstr
+        ret
+s_ts:   db "PRESS SPACE",0
+streampic_photo:
+        jp streampic
+
+title_keys:
+        bit 0,d
+        ret z
+        jp choice_enter
+
+; ---- the joystick (port 1) and RETURN / SELECT: merged into the key rows
+joymerge:
+        ld a,15                         ; PSG register 15: select joystick port 1
+        out (0xA0),a
+        ld a,0x8F
+        out (0xA1),a
+        ld a,14
+        out (0xA0),a
+        in a,(0xA2)
+        cpl
+        ld b,a                          ; B = the joystick bits, 1 = pressed: 0 up, 1 down, 2 left, 3 right, 4 trigger A, 5 trigger B
+        ld a,(k_8)
+        bit 0,b
+        jr z,.d
+        or 0x20                         ; up
+.d:     bit 1,b
+        jr z,.l
+        or 0x40                         ; down
+.l:     bit 2,b
+        jr z,.r
+        or 0x10                         ; left
+.r:     bit 3,b
+        jr z,.a
+        or 0x80                         ; right
+.a:     bit 4,b
+        jr z,.k7
+        or 0x01                         ; trigger A = SPACE
+.k7:    ld c,a
+        ld a,(k_7)
+        bit 7,a                         ; RETURN = SPACE
+        jr z,.nr
+        set 0,c
+.nr:    ld d,a
+        bit 4,b                         ; trigger A + left = ESC
+        jr z,.nb
+        bit 2,b
+        jr z,.nb
+        set 2,d
+        res 0,c
+        res 4,c
+.nb:    ld a,c
+        ld (k_8),a
+        ld a,d
+        ld (k_7),a
+        bit 5,b                         ; trigger B = H
+        ret z
+        ld a,(k_3)
+        or 0x20
+        ld (k_3),a
+        ret
+
+; SELECT: 50 Hz <-> 60 Hz (R#9 bit 1)
+toggle_hz:
+        ld a,(g_r9)
+        xor 2
+        ld (g_r9),a
+        ld c,9
+        jp setreg
+;;ENDPAGES

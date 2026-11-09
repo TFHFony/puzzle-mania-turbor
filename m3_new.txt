@@ -1,0 +1,1542 @@
+
+;;MAIN
+main:   ld sp,0xF378
+        ld hl,0xC000                    ; variables and queue start at 0
+        ld de,0xC001
+        ld bc,0x00FF
+        ld (hl),0
+        ldir
+        ld hl,GV                        ; the game variables
+        ld de,GV + 1
+        ld bc,0x015F
+        ld (hl),0
+        ldir
+        ld hl,AUD0                      ; the audio: bank AUD0 in the window of page 2
+        ld (au_bank),hl
+        ld a,l
+        ld (0x7000),a
+        ld a,h
+        ld (0x7001),a
+        ld hl,0x8000
+        ld (au_ptr),hl
+        in a,(0xE6)
+        ld (tgt),a
+        ld hl,0x7A11
+        ld (g_rng),hl
+        call menu_enter
+        ld hl,(smp)
+        ld de,15980
+        add hl,de
+        ld (g_snext),hl
+.loop:  call tick
+        ld hl,(smp)
+        ld de,(g_poll)
+        or a
+        sbc hl,de
+        bit 7,h
+        jr nz,.nk
+        call keys
+        ld hl,(g_poll)
+        ld de,200
+        add hl,de
+        ld (g_poll),hl
+.nk:    ld hl,(smp)
+        ld de,(g_snext)
+        or a
+        sbc hl,de
+        bit 7,h
+        jr nz,.loop
+        ld hl,(g_snext)
+        ld de,15980
+        add hl,de
+        ld (g_snext),hl
+        ld a,(g_mode)
+        cp 2
+        jr nz,.loop
+        ld a,(g_state)
+        or a
+        jr nz,.loop
+        ld hl,(g_secs)
+        inc hl
+        ld (g_secs),hl
+        call hud_time
+        jr .loop
+;;ENDMAIN
+
+;;KEYS
+; ---- the keyboard: the matrix rows 8 (cursor keys, SPACE), 0 (3..6), 3 (H), 7 (ESC) read directly; every new press acts
+keys:   call curs_blink
+        ld a,(k_8)
+        ld (k_8o),a
+        ld a,(k_0)
+        ld (k_0o),a
+        ld a,(k_3)
+        ld (k_3o),a
+        ld a,(k_4)
+        ld (k_4o),a
+        ld a,(k_5)
+        ld (k_5o),a
+        ld a,(k_7)
+        ld (k_7o),a
+        ld c,8
+        call rdrow
+        ld (k_8),a
+        ld c,0
+        call rdrow
+        ld (k_0),a
+        ld c,3
+        call rdrow
+        ld (k_3),a
+        ld c,4
+        call rdrow
+        ld (k_4),a
+        ld c,5
+        call rdrow
+        ld (k_5),a
+        ld c,7
+        call rdrow
+        ld (k_7),a
+        call tick
+        ld a,(k_8o)                     ; new presses of row 8 -> D, of row 7 -> E
+        cpl
+        ld b,a
+        ld a,(k_8)
+        and b
+        ld d,a
+        ld a,(k_7o)
+        cpl
+        ld b,a
+        ld a,(k_7)
+        and b
+        ld e,a
+        ld a,(g_mode)
+        or a
+        jp z,menu_keys
+        dec a
+        jp z,size_keys
+        bit 2,e                         ; the puzzle: ESC back to the menu
+        jp nz,menu_enter
+        ld a,(g_state)
+        or a
+        jr nz,.solved
+        call puz_opts
+        ld a,(g_ctl)
+        or a
+        jr z,.arrows
+        call puz_cursor_keys
+        jr .sizes
+.arrows: bit 7,d
+        ld a,0
+        jp nz,domove                    ; right
+        bit 4,d
+        ld a,1
+        jp nz,domove                    ; left
+        bit 6,d
+        ld a,2
+        jp nz,domove                    ; down
+        bit 5,d
+        ld a,3
+        jp nz,domove                    ; up
+        jr .sizes
+.solved: bit 0,d
+        jr z,.sizes
+        ld a,(g_n)
+        jp newgame
+.sizes: call nkey
+        ld a,(k_0o)
+        cpl
+        ld b,a
+        ld a,(k_0)
+        and b
+        ld d,a
+        ld a,3
+        bit 3,d
+        jp nz,newgame
+        inc a
+        bit 4,d
+        jp nz,newgame
+        inc a
+        bit 5,d
+        jp nz,newgame
+        inc a
+        bit 6,d
+        jp nz,newgame
+        ld a,(k_3)                      ; H: the picture (page 1) while the key is down
+        and 0x20
+        ld b,a
+        ld a,(g_hold)
+        cp b
+        ret z
+        ld a,b
+        ld (g_hold),a
+        or a
+        ld a,0x1F                       ; R#2: page 0
+        jr z,.pg
+        ld a,0x3F                       ; page 1
+.pg:    ld c,2
+        jp setreg
+
+anykey:                                 ; NZ = a key is down in any row of the keyboard matrix (BC kept)
+        push bc
+        ld c,8
+.r:     call rdrow
+        or a
+        jr nz,.d
+        dec c
+        jp p,.r
+        xor a
+.d:     pop bc
+        ret
+
+rdrow:  in a,(0xAA)                     ; C = row -> A = the keys that are down (1 = down)
+        and 0xF0
+        or c
+        out (0xAA),a
+        in a,(0xA9)
+        cpl
+        ret
+;;ENDKEYS
+
+;;MENU
+; ================================================================================================ the menus: photo menu (4 thumbnails per page), size menu, the puzzle
+g_mode  equ GV + 90                     ; 0 photo menu, 1 size menu, 2 puzzle
+g_photo equ GV + 91
+g_sel   equ GV + 92                     ; the photo under the cursor (0..11)
+g_ssel  equ GV + 93                     ; the size under the cursor (0..3)
+g_tmp   equ GV + 94
+g_fx    equ GV + 96                     ; the frame being drawn: x, y (words)
+g_fy    equ GV + 98
+g_fc    equ GV + 100                    ; its colour byte
+k_7     equ GV + 101
+k_7o    equ GV + 102
+g_slot  equ GV + 103
+g_cbx   equ GV + 104                    ; the sprite cursor box: x, y, width, height
+g_cby   equ GV + 105
+g_cbw   equ GV + 106
+g_cbh   equ GV + 107
+pf_off  equ GV + 203                    ; (word) the glyph set of prtstr: 0 white, 65 * 64 red, 65 * 128 yellow
+g_win   equ GV + 205                    ; the first visible column of the carousel
+g_spr   equ GV + 206                    ; 1: the sprite cursor is on
+g_cc    equ GV + 207                    ; 0: the cursor flashes, else its colour
+g_cb    equ GV + 208                    ; the flash phase
+GLYPHS  equ 63
+g_lines equ GV + 173                    ; tile lines: 0 off, 1 thick, 2 thin
+g_ctl   equ GV + 174                    ; 0 arrows slide the tile, 1 cursor + SPACE
+g_pcx   equ GV + 175                    ; the puzzle cursor
+g_pcy   equ GV + 176
+g_nsh   equ GV + 177                    ; 8: N is held (numbers shown)
+g_trk   equ GV + 351                    ; the music: 0 menu song, 1 puzzle music
+g_pdirty equ GV + 178                   ; the picture in page 1 has lines on it
+k_4     equ GV + 192                    ; keyboard row 4 (L, N)
+k_4o    equ GV + 193
+g_lw    equ GV + 194
+k_5     equ GV + 320                    ; keyboard row 5 (T); the variables from here on lie behind the move log
+k_5o    equ GV + 321
+g_act   equ GV + 324                    ; a key was pressed since the second half of the song began
+g_wo    equ GV + 325                    ; the song is in its second half
+g_mute  equ GV + 326                    ; the song is silenced (attract mode)
+g_hint  equ GV + 327                    ; the hint is shown
+g_ht    equ GV + 328                    ; (word) the sample count at which it ends
+g_hc    equ GV + 330
+g_hr    equ GV + 331
+g_aph   equ GV + 332                    ; attract mode: 1 photo menu, 2 size menu, 0 playing
+att_d   equ GV + 336                    ; 12 bytes: the photos that the attract mode has solved
+
+; a size button slot 0..3 -> (E, D) = x, y of its picture (100 x 72); the screen is the 192 lines of the original, 10 lines down (YO = 10)
+slotxy: ld a,(g_slot)
+        ld e,24                         ; (x a multiple of 4: the chroma groups of YJK)
+        bit 0,a
+        jr z,.x
+        ld e,132
+.x:     ld d,18
+        bit 1,a
+        ret z
+        ld d,98
+        ret
+
+clearscr:
+        ld hl,0
+        ld (hm_dx),hl
+        ld (hm_dy),hl
+        ld hl,256
+        ld (hm_nx),hl
+        ld hl,212
+        ld (hm_ny),hl
+        xor a
+        ld (hm_clr),a
+        ld a,0xC0
+        ld (hm_cmd),a
+        jp cmd_put
+
+; fillrect: HL = x, DE = y, B = width, C = height (<= 255), A = colour byte
+fillrect:
+        ld (hm_clr),a
+        ld (hm_dx),hl
+        ld (hm_dy),de
+        ld l,b
+        ld h,0
+        ld (hm_nx),hl
+        ld l,c
+        ld h,0
+        ld (hm_ny),hl
+        ld a,0xC0
+        ld (hm_cmd),a
+        jp cmd_put
+
+; the thumbnail (100 x 72) of photo A in slot g_slot (the size menu)
+thumb:  ld (g_tmp),a
+        call slotxy
+        push de
+        ld a,(g_tmp)
+        srl a                           ; bank = THUMB0 + photo / 2
+        ld l,a
+        ld h,0
+        ld de,THUMB0
+        add hl,de
+        ld (e_buf + 1),hl
+        ld a,(g_tmp)
+        and 1
+        ld hl,0x4000
+        jr z,.o
+        ld hl,0x4000 + 7200
+.o:     ld (e_buf + 3),hl
+        ld hl,72 * 256 + 100            ; width 100, height 72
+        ld (e_buf + 5),hl
+        ld a,2
+        ld (e_buf),a
+        pop de
+        call setpix
+        ld hl,e_buf
+        jp q_put
+
+; the thumbnail of the photo menu: A = photo, (E, D) = x, y: 104 x 80, one bank per photo
+mthumb: ld l,a
+        ld h,0
+        ld bc,MTHUMB0
+        add hl,bc
+        ld (e_buf + 1),hl
+        ld hl,0x4000
+        ld (e_buf + 3),hl
+        ld hl,80 * 256 + 104
+        ld (e_buf + 5),hl
+        ld a,2
+        ld (e_buf),a
+        call setpix
+        ld hl,e_buf
+        jp q_put
+
+; a picture from the font bank: HL = offset in the bank (+ 4000h), BC = height * 256 + width, (E, D) = x, y
+fpic:   ld (e_buf + 3),hl
+        ld (e_buf + 5),bc
+        ld hl,LOGOB
+        ld (e_buf + 1),hl
+        ld a,2
+        ld (e_buf),a
+        call setpix
+        ld hl,e_buf
+        jp q_put
+
+; the header (256 x 16 palette pixels, at y = 10) as a stream job
+logo:   ld hl,LOGOB
+        ld (e_buf + 1),hl
+        ld hl,0x4000
+        ld (e_buf + 3),hl
+        ld hl,4096
+        ld (e_buf + 5),hl
+        xor a
+        ld (e_buf + 7),a
+        ld (e_buf + 8),a
+        ld a,0x40 + 10
+        ld (e_buf + 9),a
+        ld a,1
+        ld (e_buf),a
+        ld hl,e_buf
+        jp q_put
+
+; the bottom line like the original: (C) 2026 FONY red, (.)(.) yellow, [H]ELP white
+footer: ld hl,GLYPHS * 64               ; the red set
+        ld (pf_off),hl
+        ld hl,s_copy
+        ld e,0
+        ld d,194
+        call prtstr
+        ld hl,GLYPHS * 128              ; the yellow set
+        ld (pf_off),hl
+        ld hl,s_eyes
+        ld e,104
+        ld d,194
+        call prtstr
+        ld hl,GLYPHS * 192              ; the white set
+        ld (pf_off),hl
+        ld hl,s_help
+        ld e,208
+        ld d,194
+        call prtstr
+        ld hl,0                         ; (the two-tone set again)
+        ld (pf_off),hl
+        ret
+s_copy: db 94," 2026 FONY",0
+s_eyes: db "(.)(.)",0
+s_help: db "[H]ELP",0
+
+; ---- the sprite cursor of the original: four 8 x 8 corner brackets (sprite tables in the VRAM below the picture: colours D400h, attributes D600h, patterns D800h)
+;      box (g_cbx, g_cby, g_cbw, g_cbh)
+curs_on:                                ; the tables and registers; the sprites stay off until they are placed (curs_vis)
+        call wait_idle
+        ld hl,curs_regs
+        ld b,4
+.r:     ld a,(hl)
+        out (0x99),a
+        inc hl
+        ld a,(hl)
+        out (0x99),a
+        inc hl
+        djnz .r
+        call curs_a0
+        xor a
+        out (0x99),a
+        ld a,0x40 + 0x18                ; the patterns at D800h
+        out (0x99),a
+        ld hl,curs_pat
+        ld bc,0x3098
+        otir
+        jp curs_z
+curs_regs: db 0x0A, 0x88, 0xAF, 0x85, 0x1B, 0x86, 0x01, 0x8B
+curs_pat: db 0xFF, 0xFF, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0
+        db 0xFF, 0xFF, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03
+        db 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xC0, 0xFF, 0xFF
+        db 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0xFF, 0xFF
+        db 0x3C, 0x7E, 0x7E, 0x7E, 0x7E, 0x7E, 0x7E, 0x3C          ; the confetti: a square ...
+        db 0x18, 0x3C, 0x7E, 0xFF, 0xFF, 0x7E, 0x3C, 0x18          ; ... and a diamond
+
+curs_a0:                                ; R#14 = 3: the sprite tables lie at C000h and up
+        ld a,3
+        out (0x99),a
+        ld a,0x8E
+        out (0x99),a
+        ret
+curs_z: xor a                           ; R#14 = 0 again (the jobs and commands expect it)
+        out (0x99),a
+        ld a,0x8E
+        out (0x99),a
+        ret
+
+curs_vis:                               ; the sprites on (called when they are placed: curs_col)
+        ld a,1
+        ld (g_spr),a
+        ld a,0x08
+        out (0x99),a
+        ld a,0x88
+        out (0x99),a
+        ret
+
+curs_off:                               ; the sprites off (R#8)
+        ld a,(g_spr)
+        or a
+        ret z
+        call wait_idle
+        xor a
+        ld (g_spr),a
+        ld a,0x0A
+        out (0x99),a
+        ld a,0x88
+        out (0x99),a
+        ret
+
+curs_col:                               ; A = the colour of the four brackets
+        push af
+        call wait_idle
+        call curs_a0
+        xor a
+        out (0x99),a
+        ld a,0x40 + 0x14                ; the colour table at D400h: 4 sprites * 16 bytes
+        out (0x99),a
+        pop af
+        and 15
+        ld b,64
+.c:     out (0x98),a
+        djnz .c
+        call curs_z
+        jp curs_vis
+
+curs_pos:                               ; the four brackets round the box
+        call wait_idle
+        call curs_a0
+        xor a
+        out (0x99),a
+        ld a,0x40 + 0x16                ; the attribute table at D600h
+        out (0x99),a
+        ld a,(g_cby)
+        sub 3
+        ld d,a                          ; Y of the top brackets
+        ld a,(g_cby)
+        ld hl,g_cbh
+        add a,(hl)
+        sub 7
+        ld e,a                          ; Y of the bottom brackets
+        ld a,(g_cbx)
+        sub 2
+        ld b,a                          ; X left
+        ld a,(g_cbx)
+        ld hl,g_cbw
+        add a,(hl)
+        sub 6
+        ld c,a                          ; X right
+        ld a,d
+        out (0x98),a
+        ld a,b
+        out (0x98),a
+        xor a
+        out (0x98),a
+        out (0x98),a
+        ld a,d
+        out (0x98),a
+        ld a,c
+        out (0x98),a
+        ld a,1
+        out (0x98),a
+        xor a
+        out (0x98),a
+        ld a,e
+        out (0x98),a
+        ld a,b
+        out (0x98),a
+        ld a,2
+        out (0x98),a
+        xor a
+        out (0x98),a
+        ld a,e
+        out (0x98),a
+        ld a,c
+        out (0x98),a
+        ld a,3
+        out (0x98),a
+        xor a
+        out (0x98),a
+        ld a,0xD8                       ; the end of the sprite list (mode 2 of the V9938: 0D8h, not 0D0h)
+        out (0x98),a
+        jp curs_z
+
+curs_blink:                             ; the cream bracket of the original flashes (called by the key routine)
+        ld a,(g_spr)
+        or a
+        ret z
+        ld a,(g_hint)
+        or a
+        jr nz,.hint
+        ld a,(g_cc)
+        or a
+        ret nz
+        ld a,(smp + 1)
+        rrca
+        rrca
+        rrca
+        rrca
+        and 1
+        ld hl,g_cb
+        cp (hl)
+        ret z
+        ld (hl),a
+        ld a,11
+        jr z,.c
+        ld a,10
+.c:     jp curs_col
+.hint:  ld hl,(smp)                     ; the hint flashes (white / red) for 80 frames
+        ld de,(g_ht)
+        or a
+        sbc hl,de
+        bit 7,h
+        jp z,hint_end
+        ld a,(smp + 1)
+        and 8
+        ld hl,g_cb
+        cp (hl)
+        ret z
+        ld (hl),a
+        or a
+        ld a,15
+        jr nz,.hc
+        ld a,8
+.hc:    jp curs_col
+
+; ---- the photo menu: 12 photos in 6 columns of 2, two columns (4 photos) visible, g_win = the first visible column; arrows scroll it
+menu_enter:
+        call curs_off
+        xor a
+        ld (g_mode),a
+        call mus_menu
+        call att_init
+        ld a,0x1F
+        ld c,2
+        call setreg
+        call clearscr
+        call logo
+        call footer
+        ld a,(g_sel)                    ; the column of the selection must be visible
+        srl a
+        ld b,a
+        ld a,(g_win)
+        cp b
+        jr c,.r1
+        jr z,.dn
+        ld a,b
+        jr .st
+.r1:    inc a
+        cp b
+        jr nc,.dn
+        ld a,b
+        dec a
+.st:    ld (g_win),a
+.dn:    call draw_page
+        call curs_on
+        jp menu_cursor
+
+draw_page:                              ; the four thumbnails and the arrows
+        xor a
+        ld (g_slot),a                   ; i = column * 2 + row
+.t:     call tick
+        ld a,(g_slot)
+        srl a
+        ld b,a
+        ld a,(g_win)
+        add a,b
+        add a,a
+        ld b,a
+        ld a,(g_slot)
+        and 1
+        add a,b                         ; the photo
+        push af
+        call mslotxy
+        pop af
+        call mthumb
+        ld a,(g_slot)
+        inc a
+        ld (g_slot),a
+        cp 4
+        jr nz,.t
+        ld a,(g_win)                    ; the left arrow (or black)
+        or a
+        jr z,.nl
+        ld hl,0x4000 + 4096
+        ld bc,32 * 256 + 16
+        ld e,0
+        ld d,90
+        call fpic
+        jr .rr
+.nl:    ld hl,0
+        ld de,90
+        ld b,16
+        ld c,32
+        xor a
+        call fillrect
+.rr:    ld a,(g_win)
+        cp 4
+        jr z,.nr
+        ld hl,0x4000 + 4096 + 512
+        ld bc,32 * 256 + 16
+        ld e,240
+        ld d,90
+        jp fpic
+.nr:    ld hl,240
+        ld de,90
+        ld b,16
+        ld c,32
+        xor a
+        jp fillrect
+
+mslotxy: ld a,(g_slot)                  ; slot -> (E, D) = x, y of the thumbnail
+        ld e,24
+        bit 1,a
+        jr z,.x
+        ld e,128
+.x:     ld d,26
+        bit 0,a
+        ret z
+        ld d,106
+        ret
+
+menu_cursor:
+        ld a,(g_sel)
+        srl a
+        ld hl,g_win
+        sub (hl)
+        ld a,24
+        jr z,.c
+        ld a,128
+.c:     ld (g_cbx),a
+        ld a,(g_sel)
+        and 1
+        ld a,26
+        jr z,.r
+        ld a,106
+.r:     ld (g_cby),a
+        ld a,104
+        ld (g_cbw),a
+        ld a,80
+        ld (g_cbh),a
+        xor a
+        ld (g_cc),a
+        ld (g_cb),a
+        call curs_pos
+        ld a,11
+        jp curs_col
+
+; the keys of the photo menu: D = new presses of row 8, E = of row 7
+menu_keys:
+        bit 0,d
+        jp nz,size_enter
+        bit 7,d
+        jr nz,.right
+        bit 4,d
+        jr nz,.left
+        bit 6,d
+        jr nz,.down
+        bit 5,d
+        ret z
+        ld a,(g_sel)                    ; up
+        and 1
+        ret z
+        ld hl,g_sel
+        dec (hl)
+        jp menu_cursor
+.down:  ld a,(g_sel)
+        and 1
+        ret nz
+        ld a,(g_sel)
+        inc a
+        cp 12
+        ret nc
+        ld (g_sel),a
+        jp menu_cursor
+.right: ld a,(g_sel)
+        srl a
+        ld b,a
+        ld a,(g_win)
+        cp b
+        jr z,.r1                        ; left column: the cursor to the right column
+        cp 4
+        ret nc
+        inc a                           ; right column: the carousel scrolls one column
+        ld (g_win),a
+        call .p2
+        call draw_page
+        jp menu_cursor
+.r1:    call .p2
+        jp menu_cursor
+.p2:    ld a,(g_sel)
+        add a,2
+        cp 12
+        jr c,.s
+        ld a,11
+.s:     ld (g_sel),a
+        ret
+.left:  ld a,(g_sel)
+        srl a
+        ld b,a
+        ld a,(g_win)
+        cp b
+        jr nz,.l1                       ; right column: the cursor to the left column
+        or a
+        ret z
+        dec a
+        ld (g_win),a
+        call .m2
+        call draw_page
+        jp menu_cursor
+.l1:    call .m2
+        jp menu_cursor
+.m2:    ld a,(g_sel)
+        sub 2
+        ld (g_sel),a
+        ret
+
+; ---- the size menu: the thumbnail of the photo four times, with the grids 3x3 .. 6x6 on it
+size_enter:
+        call curs_off
+        ld a,1
+        ld (g_mode),a
+        xor a
+        ld (g_ssel),a
+        call clearscr
+        ld hl,s_title2
+        ld e,80
+        ld d,10
+        call prtstr
+        ld hl,s_hint3
+        ld e,32
+        ld d,194
+        call prtstr
+        call optdraw
+        xor a
+        ld (g_slot),a
+.t:     call tick
+        ld a,(g_sel)
+        call thumb
+        call grid
+        ld a,(g_slot)
+        ld c,a
+        ld hl,s_sizes
+        add a,a
+        add a,a
+        ld e,a
+        ld d,0
+        add hl,de
+        push hl
+        call slotxy
+        ld a,e                          ; the label under the picture, centred
+        add a,38
+        ld e,a
+        ld a,d
+        add a,72
+        ld d,a
+        pop hl
+        call prtstr
+        ld a,(g_slot)
+        inc a
+        ld (g_slot),a
+        cp 4
+        jr nz,.t
+        call curs_on
+        jp size_cursor
+s_title2: db "CHOOSE SIZE",0
+s_hint3: db "SPACE: START   ESC: BACK",0
+s_sizes: db "3X3",0,"4X4",0,"5X5",0,"6X6",0
+
+size_cursor:
+        ld a,(g_ssel)
+        ld (g_slot),a
+        call slotxy
+        ld a,e
+        ld (g_cbx),a
+        ld a,d
+        ld (g_cby),a
+        ld a,100
+        ld (g_cbw),a
+        ld a,72
+        ld (g_cbh),a
+        xor a
+        ld (g_cc),a
+        ld (g_cb),a
+        call curs_pos
+        ld a,11
+        jp curs_col
+
+; grid lines of size 3 + g_slot on the thumbnail in g_slot: white bars (palette 15, byte 0F8h)
+grid:   ld a,(g_slot)
+        add a,3
+        ld (g_tmp),a                    ; n
+        call slotxy
+        ld l,e
+        ld h,0
+        ld (g_fx),hl
+        ld l,d
+        ld h,0
+        ld (g_fy),hl
+        ld b,1                          ; i = 1 .. n - 1
+.v:     push bc
+        call tick
+        ld a,(g_tmp)
+        ld d,a
+        ld a,100                        ; x = 100 * i / n (by repeated subtraction)
+        ld e,b
+        call muldiv                     ; HL = A * E / D
+        ld de,(g_fx)
+        add hl,de
+        dec hl
+        ld de,(g_fy)
+        ld a,0xF8
+        ld b,2
+        ld c,72
+        call fillrect
+        pop bc
+        ld a,(g_tmp)
+        dec a
+        inc b
+        cp b
+        jr nc,.v
+        ld b,1
+.h:     push bc
+        call tick
+        ld a,(g_tmp)
+        ld d,a
+        ld a,72
+        ld e,b
+        call muldiv
+        ld de,(g_fy)
+        add hl,de
+        dec hl
+        ex de,hl
+        ld hl,(g_fx)
+        ld a,0xF8
+        ld b,100
+        ld c,2
+        call fillrect
+        pop bc
+        ld a,(g_tmp)
+        dec a
+        inc b
+        cp b
+        jr nc,.h
+        ret
+
+; muldiv: HL = A * E / D (A <= 100, E < D <= 6)
+muldiv: ld hl,0
+        ld c,a
+        ld b,e
+        ld a,b
+        or a
+        ret z
+.m:     ld a,l
+        add a,c
+        ld l,a
+        jr nc,.n
+        inc h
+.n:     djnz .m
+        ld b,0                          ; divide by D
+        ld c,d
+        ld de,0
+.d:     or a
+        sbc hl,bc
+        jr c,.e
+        inc de
+        jr .d
+.e:     ex de,hl
+        ret
+
+; the keys of the size menu
+size_keys:
+        bit 0,d
+        jp nz,puzzle_enter
+        bit 2,e
+        jp nz,menu_enter
+        call size_opts
+        ld a,(g_ssel)
+        ld c,a
+        bit 7,d
+        jr z,.l
+        inc a
+.l:     bit 4,d
+        jr z,.d
+        dec a
+.d:     bit 6,d
+        jr z,.u
+        add a,2
+.u:     bit 5,d
+        jr z,.w
+        sub 2
+.w:     cp 4
+        ret nc                          ; (outside 0..3, negative numbers are big)
+        cp c
+        ret z
+        ld (g_ssel),a
+        jp size_cursor
+
+; ---- the options of the original: L = tile lines (off, thick, thin), C = how a tile is moved (arrows / cursor + SPACE), N = tile numbers, moves and time while it is held
+; optedge: B = the new presses of row 4 (L = bit 1, N = bit 3), C = of row 3 (C = bit 0)
+optedge:
+        ld a,(k_4o)
+        cpl
+        ld b,a
+        ld a,(k_4)
+        and b
+        ld b,a
+        ld a,(k_3o)
+        cpl
+        ld c,a
+        ld a,(k_3)
+        and c
+        ld c,a
+        ret
+
+lines_next:                             ; L: off -> thick -> thin -> off
+        ld a,(g_lines)
+        inc a
+        cp 3
+        jr c,.s
+        xor a
+.s:     ld (g_lines),a
+        ret
+
+; the option lines of the size menu: L LINES: OFF    C MOVE: ARROWS
+optdraw:
+        ld hl,s_lines
+        ld e,8
+        ld d,186
+        call prtstr
+        ld a,(g_lines)
+        add a,a
+        add a,a
+        add a,a
+        ld l,a
+        ld h,0
+        ld de,s_lnn
+        add hl,de
+        ld e,72
+        ld d,186
+        call prtstr
+        ld hl,s_ctl
+        ld e,136
+        ld d,186
+        call prtstr
+        ld a,(g_ctl)
+        add a,a
+        add a,a
+        add a,a
+        ld l,a
+        ld h,0
+        ld de,s_ctn
+        add hl,de
+        ld e,192
+        ld d,186
+        jp prtstr
+s_lines: db "L LINES:",0
+s_ctl:  db "C MOVE:",0
+s_lnn:  db "OFF    ",0,"THICK  ",0,"THIN   ",0
+s_ctn:  db "ARROWS ",0,"CURSOR ",0
+
+size_opts:                              ; L and C in the size menu
+        push de
+        call optedge
+        bit 1,b
+        jr z,.nl
+        push bc
+        call lines_next
+        call optdraw
+        pop bc
+.nl:    bit 0,c
+        jr z,.nc
+        ld a,(g_att)                    ; (C does nothing in the attract mode)
+        or a
+        jr nz,.nc
+        ld a,(g_ctl)
+        xor 1
+        ld (g_ctl),a
+        call optdraw
+.nc:    pop de
+        ret
+
+; the picture of the photo g_sel into page 1 of the VRAM (y + 256) as the source of the tiles
+band:                                   ; DE = y: 256 x 10 black pixels in page 1
+        ld (hm_dy),de
+        ld hl,0
+        ld (hm_dx),hl
+        ld hl,256
+        ld (hm_nx),hl
+        ld hl,10
+        ld (hm_ny),hl
+        xor a
+        ld (hm_clr),a
+        ld a,0xC0
+        ld (hm_cmd),a
+        jp cmd_put
+
+load_pic:                               ; the picture of photo g_sel: 256 x 192 at y = 266 of page 1 (the screen line 10 + 256), the bands above and below black (the view with H)
+        xor a
+        ld (g_pdirty),a
+        ld de,256
+        call band
+        ld de,458
+        call band
+        ld a,(g_sel)
+        ld b,a
+        add a,a
+        add a,b
+        ld l,a
+        ld h,0
+        ld de,FULL0
+        add hl,de
+        ld (e_buf + 1),hl
+        xor a
+        ld (g_i),a
+.ph:    ld a,1
+        ld (e_buf),a
+        ld hl,0x4000
+        ld (e_buf + 3),hl
+        ld hl,16384
+        ld (e_buf + 5),hl
+        ld a,(g_i)
+        add a,4
+        ld (e_buf + 7),a
+        xor a
+        ld (e_buf + 8),a
+        ld a,0x40 + 10                  ; (address 10 * 256 of the window: the picture starts at line 10)
+        ld (e_buf + 9),a
+        ld hl,e_buf
+        call q_put
+        ld hl,(e_buf + 1)
+        inc hl
+        ld (e_buf + 1),hl
+        ld a,(g_i)
+        inc a
+        ld (g_i),a
+        cp 3
+        jr nz,.ph
+        ret
+
+; the tile lines on the picture in page 1: the right and the bottom edge of every tile (white, 2 or 1 pixels)
+puz_lines:
+        ld a,(g_lines)
+        or a
+        ret z
+        ld b,a
+        ld a,3
+        sub b                           ; thick (1): 2, thin (2): 1
+        ld (g_lw),a
+        ld a,1
+        ld (g_pdirty),a
+        xor a
+        ld (g_row),a
+.r:     xor a
+        ld (g_col),a
+.c:     call tick
+        ld a,(g_col)
+        call xpix
+        ld (g_fx),hl
+        ld a,(g_row)
+        call ypix
+        ld (g_fy),hl
+        ld a,(g_tw)                     ; the right edge: x + tw - lw, y, lw x th
+        ld e,a
+        ld d,0
+        ld hl,(g_fx)
+        add hl,de
+        ld a,(g_lw)
+        ld e,a
+        ld d,0
+        or a
+        sbc hl,de
+        ld de,(g_fy)
+        push hl
+        ld hl,256
+        add hl,de
+        ex de,hl
+        pop hl
+        ld a,(g_lw)
+        ld b,a
+        ld a,(g_th)
+        ld c,a
+        call linerect
+        ld hl,(g_fy)                    ; the bottom edge: x, y + th - lw, tw x lw
+        ld a,(g_th)
+        ld e,a
+        ld d,0
+        add hl,de
+        ld a,(g_lw)
+        ld e,a
+        ld d,0
+        or a
+        sbc hl,de
+        ld de,256
+        add hl,de
+        ex de,hl
+        ld hl,(g_fx)
+        ld a,(g_tw)
+        ld b,a
+        ld a,(g_lw)
+        ld c,a
+        call linerect
+        ld a,(g_col)
+        inc a
+        ld (g_col),a
+        ld hl,g_n
+        cp (hl)
+        jr c,.c
+        ld a,(g_row)
+        inc a
+        ld (g_row),a
+        ld hl,g_n
+        cp (hl)
+        jp c,.r
+        ret
+
+linerect:                               ; HL = x, DE = y, B = width, C = height: white lines on the photo, only the luma bits change (the chroma of the YJK groups stays)
+        ld (hm_dx),hl
+        ld (hm_dy),de
+        ld l,b
+        ld h,0
+        ld (hm_nx),hl
+        ld l,c
+        ld h,0
+        ld (hm_ny),hl
+        ld a,0x07                       ; LMMV AND 07h: luma 0
+        ld (hm_clr),a
+        ld a,0x81
+        ld (hm_cmd),a
+        call cmd_put
+        ld a,0xF0                       ; LMMV OR F0h: luma 15
+        ld (hm_clr),a
+        ld a,0x82
+        ld (hm_cmd),a
+        jp cmd_put
+
+puz_reload:                             ; L in the puzzle: the picture again with the new lines, the board again
+        call load_pic
+        call puz_lines
+        jp render
+
+; ---- the cursor control (C): the brackets round a tile, SPACE slides it
+puz_ctl_init:
+        ld a,(g_gx)
+        ld (g_pcx),a
+        ld a,(g_gy)
+        ld (g_pcy),a
+        call curs_on
+        jp puz_curbox
+puz_curbox:
+        ld a,(g_pcx)
+        call xpix
+        ld a,l
+        ld (g_cbx),a
+        ld a,(g_pcy)
+        call ypix
+        ld a,l
+        ld (g_cby),a
+        ld a,(g_tw)
+        ld (g_cbw),a
+        ld a,(g_th)
+        ld (g_cbh),a
+        xor a
+        ld (g_cc),a
+        ld (g_cb),a
+        call curs_pos
+        ld a,11
+        jp curs_col
+
+puz_opts:                               ; L and C in the puzzle
+        push de
+        call optedge
+        bit 1,b
+        jr z,.nl
+        push bc
+        call lines_next
+        call puz_reload
+        pop bc
+.nl:    bit 0,c
+        jr z,.nc
+        ld a,(g_att)                    ; (C does nothing in the attract mode)
+        or a
+        jr nz,.nc
+        ld a,(g_ctl)
+        xor 1
+        ld (g_ctl),a
+        jr z,.off
+        call puz_ctl_init
+        jr .nc
+.off:   call curs_off
+.nc:    ld a,(k_5o)                     ; T: the hint
+        cpl
+        ld b,a
+        ld a,(k_5)
+        and b
+        bit 1,a
+        call nz,hint_start
+        pop de
+        ret
+
+; ---- the hint (T): the tile that belongs on the square where the gap is now (if the gap is home: the first tile that is out of place), flashing for 80 frames; a move ends it
+hint_start:
+        ld a,(g_gy)
+        ld b,a
+        ld a,(g_n)
+        ld e,a
+        xor a
+        inc b
+.m:     dec b
+        jr z,.md
+        add a,e
+        jr .m
+.md:    ld hl,g_gx
+        add a,(hl)                      ; the number of the tile that belongs on the gap's square
+        ld d,a
+        call mulnn
+        dec c
+        ld a,d
+        cp c
+        jr z,.fb
+        ld hl,board
+        ld c,0
+.f1:    ld a,(hl)
+        cp d
+        jr z,.got
+        inc hl
+        inc c
+        jr .f1
+.fb:    ld hl,board
+        ld c,0
+.f2:    ld a,(hl)
+        cp c
+        jr nz,.got
+        inc hl
+        inc c
+        ld a,c
+        cp 36
+        ret nc
+        jr .f2
+.got:   ld a,c
+        ld b,0
+        ld hl,g_n
+        ld e,(hl)
+.dv:    cp e
+        jr c,.dd
+        sub e
+        inc b
+        jr .dv
+.dd:    ld (g_hc),a
+        ld a,b
+        ld (g_hr),a
+        ld a,(g_hc)
+        call xpix
+        ld a,l
+        ld (g_cbx),a
+        ld a,(g_hr)
+        call ypix
+        ld a,l
+        ld (g_cby),a
+        ld a,(g_tw)
+        ld (g_cbw),a
+        ld a,(g_th)
+        ld (g_cbh),a
+        ld hl,(smp)
+        ld de,25568
+        add hl,de
+        ld (g_ht),hl
+        ld a,1
+        ld (g_hint),a
+        ld a,0xFF
+        ld (g_cb),a
+        call curs_on
+        call curs_pos
+        ld a,15
+        jp curs_col
+
+hint_end:
+        xor a
+        ld (g_hint),a
+        ld a,(g_ctl)
+        or a
+        jp z,curs_off
+        jp puz_curbox
+
+hint_chk:                               ; (a move ends the hint; A is kept)
+        push af
+        ld a,(g_hint)
+        or a
+        call nz,hint_end
+        pop af
+        ret
+
+puz_cursor_keys:                        ; D = the new presses of row 8: the arrows move the cursor, SPACE slides the tile
+        ld a,(g_pcx)
+        ld b,a
+        ld a,(g_pcy)
+        ld c,a
+        bit 7,d
+        jr z,.nr
+        ld a,b
+        inc a
+        ld hl,g_n
+        cp (hl)
+        jr nc,.nr
+        ld b,a
+.nr:    bit 4,d
+        jr z,.nl
+        ld a,b
+        or a
+        jr z,.nl
+        dec b
+.nl:    bit 6,d
+        jr z,.nd
+        ld a,c
+        inc a
+        ld hl,g_n
+        cp (hl)
+        jr nc,.nd
+        ld c,a
+.nd:    bit 5,d
+        jr z,.nu
+        ld a,c
+        or a
+        jr z,.nu
+        dec c
+.nu:    ld a,b
+        ld (g_pcx),a
+        ld a,c
+        ld (g_pcy),a
+        push de
+        call puz_curbox
+        pop de
+        bit 0,d
+        ret z
+        ld a,(g_pcx)
+        ld hl,g_gx
+        sub (hl)
+        ld b,a                          ; dx of the tile to the gap
+        ld a,(g_pcy)
+        ld hl,g_gy
+        sub (hl)
+        ld c,a                          ; dy
+        or a
+        jr nz,.vert
+        ld a,b
+        cp 0xFF
+        ld a,0                          ; the tile is left of the gap: the key "right"
+        jp z,domove
+        ld a,b
+        cp 1
+        ld a,1
+        jp z,domove
+        ret
+.vert:  ld a,b
+        or a
+        ret nz
+        ld a,c
+        cp 0xFF
+        ld a,2                          ; the tile is above the gap: the key "down"
+        jp z,domove
+        ld a,c
+        cp 1
+        ld a,3
+        jp z,domove
+        ret
+
+; ---- N held: the numbers on the tiles, moves and time in the gap
+nkey:   ld a,(k_4)
+        and 8
+        ld b,a
+        ld a,(g_nsh)
+        cp b
+        ret z
+        ld a,b
+        ld (g_nsh),a
+        or a
+        jp nz,nums_on
+        jp render                       ; released: the board again (no numbers, no stats)
+
+nums_on:
+        xor a
+        ld (g_i),a
+.cell:  call tick
+        ld a,(g_i)
+        ld c,a
+        ld a,(g_n)
+        ld d,a
+        ld a,c
+        ld b,0
+.dv:    cp d
+        jr c,.dd
+        sub d
+        inc b
+        jr .dv
+.dd:    ld (g_col),a
+        ld a,b
+        ld (g_row),a
+        ld hl,board
+        ld a,(g_i)
+        ld e,a
+        ld d,0
+        add hl,de
+        ld a,(hl)
+        ld (g_tile),a
+        call mulnn
+        dec c
+        ld a,(g_tile)
+        cp c
+        jr z,.next                      ; the gap
+        inc a
+        ld l,a
+        ld h,0
+        call dec5
+        ld hl,d_buf + 3
+        ld a,(hl)
+        cp '0'
+        jr nz,.t
+        inc hl
+.t:     push hl
+        ld a,(g_col)
+        call xpix
+        ld a,l
+        ld (g_fx),a
+        ld a,(g_row)
+        call ypix
+        inc hl
+        ld a,l
+        ld (g_fy),a
+        pop hl
+        ld a,(g_fx)
+        ld e,a
+        ld a,(g_fy)
+        ld d,a
+        call prtstr
+.next:  ld a,(g_i)
+        inc a
+        ld (g_i),a
+        ld c,a
+        call mulnn
+        ld a,(g_i)
+        cp c
+        jr nz,.cell
+nums_stats:                             ; MOVES n and TIME n in the gap (4 lines of 5 characters)
+        ld a,(g_gx)
+        call xpix
+        ld a,(g_tw)
+        sub 40
+        srl a
+        ld e,a
+        ld d,0
+        add hl,de
+        ld a,l
+        ld (g_fx),a
+        ld a,(g_gy)
+        call ypix
+        ld a,(g_th)
+        sub 32
+        srl a
+        ld e,a
+        ld d,0
+        add hl,de
+        ld a,l
+        ld (g_fy),a
+        ld hl,s_moves
+        call .p
+        ld hl,(g_moves)
+        call dec5
+        ld hl,d_buf
+        call .p
+        ld hl,s_time
+        call .p
+        ld hl,(g_secs)
+        call dec5
+        ld hl,d_buf
+.p:     ld a,(g_fx)
+        ld e,a
+        ld a,(g_fy)
+        ld d,a
+        call prtstr
+        ld a,(g_fy)
+        add a,8
+        ld (g_fy),a
+        ret
+s_moves: db "MOVES",0
+s_time: db "TIME ",0
+
+hud_all:                                ; (the original has no bottom line: moves and time only while N is held)
+hud_moves:
+hud_time:
+        ld a,(g_nsh)
+        or a
+        ret z
+        jp nums_stats
+
+; the puzzle with the photo g_sel in the size 3 + g_ssel: the picture into page 1 of the VRAM, then a new game
+puzzle_enter:
+        call curs_off
+        call rnd_seed
+        call mus_puzzle
+        ld a,2
+        ld (g_mode),a
+        call clearscr
+        call load_pic
+        ld a,(g_ssel)
+        add a,3
+        jp newgame
+;;ENDMENU

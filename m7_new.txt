@@ -1,0 +1,808 @@
+
+;;ATT
+; ================================================================================================ the attract mode (puzzle solved by undoing the shuffle, memory played by a bot) and the win jingle
+g_att   equ GV + 210                    ; 1 = the attract mode plays
+g_ak    equ GV + 211                    ; the next kind: 0 puzzle, 1 memory
+g_shn   equ GV + 213                    ; the number of shuffle moves (200; the attract mode uses fewer)
+g_dir   equ GV + 214
+g_lp    equ GV + 216                    ; the pointer in the move log
+au_start equ GV + 218
+au_end  equ GV + 220
+b_t     equ GV + 222                    ; the sample count of the next action of the attract mode
+b_tgt   equ GV + 224                    ; the card the bot goes to (255 = none)
+g_tm2   equ GV + 226
+m_seen  equ GV + 230                    ; 20 places: the card has been seen
+MLOG    equ GV + 256                    ; the log of the shuffle moves of the attract mode (up to 64)
+
+; ---- the attract mode starts like the original: when the menu song is over and nobody pressed a key in its second half (att_check, called by the key routine)
+ATTHB   equ AUD0 + AUDN / 2             ; the first bank of the second half of the song
+ATT_SHOW equ 28764                      ; 90 frames of 50 Hz: the cursor stays on the photo / the size
+ATT_MOVE equ 30680                      ; 96 frames: one move per 1.92 s
+att_init:                               ; the menu / choice screen is entered: that counts as a key, the second half counts from the next one
+        ld a,1
+        ld (g_act),a
+        ld hl,(au_bank)
+        ld de,ATTHB
+        or a
+        sbc hl,de
+        ld a,1
+        jr nc,.s
+        xor a
+.s:     ld (g_wo),a
+        ret
+
+att_check:
+        ld a,(g_att)
+        or a
+        ret nz
+        ld a,(g_mode)
+        or a
+        jr z,.ok
+        cp 3
+        ret nz
+.ok:    ld hl,(au_bank)
+        ld de,ATTHB
+        or a
+        sbc hl,de
+        jr c,.first
+        ld a,(g_wo)
+        or a
+        jr nz,.open
+        inc a
+        ld (g_wo),a                     ; the second half begins: from now on a key counts
+        xor a
+        ld (g_act),a
+        ret
+.open:  ld a,(g_act)
+        or a
+        ret nz                          ; a key: the song goes round again
+        ld hl,(au_bank)
+        ld de,AUD0 + AUDN - 1
+        or a
+        sbc hl,de
+        ret nz                          ; not the last bank
+        ld a,(au_ptr + 1)
+        cp 0xB4                         ; (the last part of the song)
+        ret c
+        jr att_go
+.first: xor a
+        ld (g_wo),a
+        ret
+
+att_go:
+        call rnd_seed
+        ld a,1
+        ld (g_att),a
+        call att_mute
+        ld a,(g_mode)
+        or a
+        jr z,.slide                     ; in the photo menu: the sliding puzzle
+        ld a,(g_ak)
+        xor 1
+        ld (g_ak),a
+        jr z,.slide
+        call att_unmute                 ; (the memory game has its own music, like the original)
+        ld a,255                        ; memory (from the choice screen)
+        ld (b_tgt),a
+        ld hl,(smp)
+        ld (b_t),hl
+        jp memory_enter
+.slide: call att_pick                   ; a photo that has not been solved yet, and a size (3 or 4)
+        ld a,1
+        ld (g_aph),a
+        call menu_enter                 ; the photo menu: the carousel shows the photo, the cursor stays on it
+        ld hl,(smp)
+        ld de,ATT_SHOW
+        add hl,de
+        ld (b_t),hl
+        ret
+
+att_pick:
+        ld hl,(smp)
+        ld de,(g_rng)
+        add hl,de
+        ld (g_rng),hl
+.go:    call rnd
+        call mod12
+        ld e,a
+        ld d,0
+        ld hl,att_d
+        add hl,de
+        ld a,(hl)
+        or a
+        jr nz,.go
+        ld (hl),1
+        ld a,e
+        ld (g_sel),a
+        ld hl,att_d                     ; all twelve done: the list starts again (the photo of now stays marked)
+        ld b,12
+.c:     ld a,(hl)
+        or a
+        jr z,.ok
+        inc hl
+        djnz .c
+        ld hl,att_d
+        ld b,12
+        xor a
+.z:     ld (hl),a
+        inc hl
+        djnz .z
+        ld hl,att_d
+        add hl,de
+        inc (hl)
+.ok:    call rnd
+        and 1
+        ld (g_ssel),a
+        ret
+
+att_mute:                               ; the song goes on silent (a bank of silence in its place)
+        ld a,(g_mute)
+        or a
+        ret nz
+        inc a
+        ld (g_mute),a
+        ld hl,SILB
+        ld de,SILB + 1
+        call au_play
+        ret
+
+att_unmute:                             ; the song again, from its start
+        ld a,(g_mute)
+        or a
+        ret z
+        xor a
+        ld (g_mute),a
+        ld (g_trk),a
+        ld hl,AUD0
+        ld de,AUD0 + AUDN
+        call au_play
+        ret
+
+att_stop:                               ; a key: back to the choice screen
+        xor a
+        ld (g_att),a
+        ld (g_aph),a
+        ld a,200
+        ld (g_shn),a
+        call att_unmute
+        jp choice_enter
+
+; ---- every tick of the main loop in the attract mode
+att_tick:
+        ld hl,(smp)
+        ld de,(b_t)
+        or a
+        sbc hl,de
+        bit 7,h
+        ret nz
+        ld a,(g_aph)
+        or a
+        jr z,.run
+        dec a
+        jr z,.tosize
+        xor a                           ; phase 2: the puzzle: 35 moves of shuffle (3x3) or 60 (4x4), undone one per 1.92 s
+        ld (g_aph),a
+        ld a,(g_ssel)
+        or a
+        ld a,35
+        jr z,.sh
+        ld a,60
+.sh:    ld (g_shn),a
+        ld hl,(smp)
+        ld de,ATT_MOVE
+        add hl,de
+        ld (b_t),hl
+        call att_unmute                 ; (the puzzle plays its music: only the choice of the photo and the size is silent)
+        jp puzzle_enter
+.tosize: ld a,2                         ; phase 1: the size menu, the cursor goes to 3x3 or 4x4
+        ld (g_aph),a
+        ld a,(g_ssel)
+        push af
+        call size_enter
+        pop af
+        ld (g_ssel),a
+        call size_cursor
+        ld hl,(smp)
+        ld de,ATT_SHOW
+        add hl,de
+        ld (b_t),hl
+        ret
+.run:   ld a,(g_mode)
+        cp 2
+        jp z,att_puzzle_step
+        cp 4
+        ret nz
+        ; ---- memory: the bot (it plays with what it has seen)
+        ld hl,(smp)
+        ld de,5114                      ; 2 calls of the bot (16 frames) to the next step of the cursor
+        add hl,de
+        ld (b_t),hl
+.play:  ld a,(m_wait)
+        ld b,a
+        ld a,(m_wait + 1)
+        or b
+        ret nz
+        ld a,(b_tgt)
+        cp 255
+        call z,bot_pick
+        ld a,(b_tgt)
+        ld c,a
+        ld a,(m_cur)
+        cp c
+        jr z,.at
+        call div5                       ; the cursor: column A, row B
+        ld e,a
+        ld d,b
+        ld a,c
+        call div5                       ; the target: column A, row B
+        cp e
+        jr z,.vert
+        ld a,0x10                       ; left
+        jr c,.go
+        ld a,0x80                       ; right
+        jr .go
+.vert:  ld a,b
+        cp d
+        ld a,0x20                       ; up
+        jr c,.go
+        ld a,0x40                       ; down
+.go:    ld d,a
+        ld e,0
+        jp mem_keys
+.at:    ld hl,(smp)                     ; there: turn the card, then a moment (8 calls = 64 frames) before the next card
+        ld de,20456
+        add hl,de
+        ld (b_t),hl
+        ld d,1
+        ld e,0
+        ld a,255
+        ld (b_tgt),a
+        jp mem_keys
+
+div5:    ld b,0                          ; A -> A = A mod 5, B = A div 5
+.l:     cp 5
+        ret c
+        sub 5
+        inc b
+        jr .l
+
+; bot_pick: the card to go to (b_tgt): a known pair first, the partner of the card that is up, else a card that has not been seen
+bot_pick:
+        ld a,(m_f1)
+        cp 255
+        jr z,.first
+        ld e,a                          ; the second card: the partner of m_f1, if it has been seen
+        ld d,0
+        ld hl,m_pic
+        add hl,de
+        ld b,(hl)
+        ld c,0
+.sp:    ld a,c
+        ld hl,m_f1
+        cp (hl)
+        jr z,.sn
+        ld e,c
+        ld d,0
+        ld hl,m_st
+        add hl,de
+        ld a,(hl)
+        or a
+        jr nz,.sn
+        ld hl,m_seen
+        add hl,de
+        ld a,(hl)
+        or a
+        jr z,.sn
+        ld hl,m_pic
+        add hl,de
+        ld a,(hl)
+        cp b
+        jr nz,.sn
+        ld a,c
+        ld (b_tgt),a
+        ret
+.sn:    inc c
+        ld a,c
+        cp 20
+        jr nz,.sp
+        jr .unseen
+.first: ld c,0                          ; a known pair among the cards that are face down
+.f1:    ld e,c
+        ld d,0
+        ld hl,m_st
+        add hl,de
+        ld a,(hl)
+        or a
+        jr nz,.fn
+        ld hl,m_seen
+        add hl,de
+        ld a,(hl)
+        or a
+        jr z,.fn
+        ld hl,m_pic
+        add hl,de
+        ld b,(hl)
+        ld a,c
+        inc a
+        ld e,a
+.f2:    ld a,e
+        cp 20
+        jr nc,.fn
+        ld d,0
+        push hl
+        ld hl,m_st
+        add hl,de
+        ld a,(hl)
+        pop hl
+        or a
+        jr nz,.f3
+        push hl
+        ld hl,m_seen
+        add hl,de
+        ld a,(hl)
+        pop hl
+        or a
+        jr z,.f3
+        push hl
+        ld hl,m_pic
+        add hl,de
+        ld a,(hl)
+        pop hl
+        cp b
+        jr nz,.f3
+        ld a,c
+        ld (b_tgt),a
+        ret
+.f3:    inc e
+        jr .f2
+.fn:    inc c
+        ld a,c
+        cp 20
+        jr nz,.f1
+.unseen: ld b,60                        ; a random card that is face down and has not been seen (or any face down card)
+.u:     push bc
+        call rnd
+        call mod20
+        pop bc
+        ld e,a
+        ld d,0
+        ld hl,m_st
+        add hl,de
+        ld a,(hl)
+        or a
+        jr nz,.un
+        ld a,(m_f1)
+        cp e
+        jr z,.un
+        ld a,b
+        cp 30
+        jr c,.ok                        ; (later tries: seen cards are fine)
+        ld hl,m_seen
+        add hl,de
+        ld a,(hl)
+        or a
+        jr nz,.un
+.ok:    ld a,e
+        ld (b_tgt),a
+        ret
+.un:    djnz .u
+        ld c,0                          ; (the first card that is face down)
+.l:     ld e,c
+        ld d,0
+        ld hl,m_st
+        add hl,de
+        ld a,(hl)
+        or a
+        jr nz,.ln
+        ld a,(m_f1)
+        cp c
+        jr z,.ln
+        ld a,c
+        ld (b_tgt),a
+        ret
+.ln:    inc c
+        jr .l
+
+; ---- the sliding puzzle in the attract mode: undo the shuffle, one move per 0.4 s; the move log was made by newgame
+att_puzzle_step:
+        ld hl,(smp)
+        ld de,ATT_MOVE
+        add hl,de
+        ld (b_t),hl
+.play:  ld hl,(g_lp)                  ; (when the puzzle is solved the win sequence takes over: it never comes back here)
+        ld de,MLOG
+        or a
+        sbc hl,de
+        ret z
+        ld hl,(g_lp)
+        dec hl
+        ld (g_lp),hl
+        ld a,(hl)                       ; the direction of the gap in the shuffle = the key that undoes it
+        jp domove
+
+; ---- the win jingle: the music pauses, the jingle plays, the music goes on
+jingle:
+        ld hl,(au_bank)
+        push hl
+        ld hl,(au_ptr)
+        push hl
+        ld hl,(au_start)
+        push hl
+        ld hl,(au_end)
+        push hl
+        ld hl,JING0
+        ld de,JING0 + JINGN
+        call au_play
+        ld hl,(smp)
+        ld de,JINGLEN
+        add hl,de
+        ld (g_tm2),hl
+.w:     call tick
+        ld hl,(smp)
+        ld de,(g_tm2)
+        or a
+        sbc hl,de
+        bit 7,h
+        jr nz,.w
+        pop hl
+        ld (au_end),hl
+        pop hl
+        ld (au_start),hl
+        pop hl
+        ld (au_ptr),hl
+        pop hl
+        ld (au_bank),hl
+        ld a,l
+        ld (0x7000),a
+        ld a,h
+        ld (0x7001),a
+        ret
+
+; ---- the win sequence of the original: the whole photo, "SOLVED! MOVES n TIME m:ss" on the bottom row, the jingle, then confetti and a flashing frame (silent, 230 frames,
+;      SPACE ends it after 60), then the clip of the photo
+NCONF   equ 12
+CONF    equ MLOG                        ; (the move log is not needed any more when the puzzle is solved): y, x, speed, drift, colour per piece
+
+win_seq:
+        ld a,(g_pdirty)                 ; the plain photo (not the one with tile lines)
+        or a
+        call nz,load_pic
+        ld hl,0                         ; page 1 (0, 266) -> the screen (0, 10): the 192 lines of the photo
+        ld (hm_sx),hl
+        ld (hm_dx),hl
+        ld hl,266
+        ld (hm_sy),hl
+        ld hl,10
+        ld (hm_dy),hl
+        ld hl,256
+        ld (hm_nx),hl
+        ld hl,192
+        ld (hm_ny),hl
+        xor a
+        ld (hm_clr),a
+        ld a,0xD0
+        ld (hm_cmd),a
+        call cmd_put
+        call win_banner
+        call jingle
+        call conf_show
+        ld a,(g_sel)
+        jp clip_start
+
+win_mem:                                ; memory: the board stays, the jingle, the confetti, the clip of the last pair
+        call jingle
+        call conf_show
+        ld a,(m_last)
+        jp clip_start
+
+win_banner:
+        ld hl,s_wsolved
+        ld e,8
+        ld d,203
+        call prtstr
+        push de
+        ld hl,(g_moves)
+        call dec5
+        pop de
+        ld hl,d_buf + 2
+        call prtstr
+        ld hl,s_wtime
+        call prtstr
+        push de
+        ld hl,(g_secs)                  ; minutes and seconds
+        ld c,0
+        ld de,60
+.m:     or a
+        sbc hl,de
+        jr c,.d
+        inc c
+        jr .m
+.d:     add hl,de
+        ld a,c
+        cp 10
+        jr c,.m1
+        ld a,9
+.m1:    add a,'0'
+        ld (tbuf),a
+        ld a,l
+        ld b,0
+.t:     cp 10
+        jr c,.t2
+        sub 10
+        inc b
+        jr .t
+.t2:    add a,'0'
+        ld (tbuf + 3),a
+        ld a,b
+        add a,'0'
+        ld (tbuf + 2),a
+        pop de
+        ld hl,tbuf
+        jp prtstr
+s_wsolved: db "SOLVED! MOVES ",0
+s_wtime: db " TIME ",0
+tbuf:   db "0:00",0
+
+conf_show:
+        ld hl,(au_bank)                 ; the sound off (a bank of silence), the song is put back afterwards
+        push hl
+        ld hl,(au_ptr)
+        push hl
+        ld hl,(au_start)
+        push hl
+        ld hl,(au_end)
+        push hl
+        ld hl,SILB
+        ld de,SILB + 1
+        call au_play
+        call curs_on
+        call conf_init                  ; (the pieces only: the brackets of the menus stay away)
+        call curs_vis
+        ld hl,0
+        ld (g_tm2),hl
+        ld hl,(smp)
+        ld (g_ht),hl
+.f:     call tick
+        ld hl,(smp)
+        ld de,(g_ht)
+        or a
+        sbc hl,de
+        bit 7,h
+        jr nz,.f
+        ld hl,(g_ht)                    ; one frame (1 / 50 s) = 320 samples
+        ld de,320
+        add hl,de
+        ld (g_ht),hl
+        ld a,(g_tm2)
+        srl a
+        and 15
+        cp 14
+        jr c,.ok
+        sub 14
+.ok:    add a,2
+        out (0x99),a                    ; the border flashes (R#7)
+        ld a,0x87
+        out (0x99),a
+        call conf_step
+        ld hl,(g_tm2)
+        inc hl
+        ld (g_tm2),hl
+        ld a,l
+        cp 230
+        jr z,.end
+        cp 60
+        jr c,.f
+        ld c,8
+        call rdrow
+        and 1
+        jr z,.f
+.end:   ld a,1
+        out (0x99),a
+        ld a,0x87
+        out (0x99),a
+        call curs_off
+        pop hl
+        ld (au_end),hl
+        pop hl
+        ld (au_start),hl
+        pop hl
+        ld (au_ptr),hl
+        pop hl
+        ld (au_bank),hl
+        ld a,l
+        ld (0x7000),a
+        ld a,h
+        ld (0x7001),a
+        ret
+
+conf_init:
+        ld hl,CONF
+        ld b,NCONF
+.i:     push bc
+        push hl
+        call rnd
+        cp 192
+        jr c,.y
+        sub 64
+.y:     pop hl
+        ld (hl),a
+        inc hl
+        push hl
+        call rnd
+        pop hl
+        ld (hl),a
+        inc hl
+        push hl
+        call rnd
+        pop hl
+        and 3
+        add a,2
+        ld (hl),a
+        inc hl
+        push hl
+        call rnd
+        pop hl
+        and 3
+        sub 2
+        ld (hl),a
+        inc hl
+        push hl
+        call rnd
+        pop hl
+        and 15
+        cp 2
+        jr nc,.c
+        add a,8
+.c:     ld (hl),a
+        inc hl
+        pop bc
+        djnz .i
+        call curs_a0                    ; the sprites 0..3 (the brackets) out of sight, above the screen
+        xor a
+        out (0x99),a
+        ld a,0x40 + 0x16
+        out (0x99),a
+        ld b,4
+.pk:    ld a,0xE8
+        out (0x98),a
+        xor a
+        out (0x98),a
+        out (0x98),a
+        out (0x98),a
+        djnz .pk
+        call curs_a0                    ; the colours of the sprites 4.. (one colour per piece)
+        ld a,0x40
+        out (0x99),a
+        ld a,0x40 + 0x14
+        out (0x99),a
+        ld hl,CONF + 4
+        ld c,NCONF
+.k:     ld a,(hl)
+        ld b,16
+.k2:    out (0x98),a
+        djnz .k2
+        ld de,5
+        add hl,de
+        dec c
+        jr nz,.k
+        jp curs_z
+
+conf_step:                              ; the pieces fall: y + speed, x + drift
+        call curs_a0
+        ld a,0x10
+        out (0x99),a
+        ld a,0x40 + 0x16
+        out (0x99),a
+        ld hl,CONF
+        ld b,NCONF
+        ld c,0
+.s:     ld a,(hl)
+        inc hl
+        ld d,(hl)
+        inc hl
+        add a,(hl)
+        cp 192
+        jr c,.ok
+        cp 0xE0
+        jr nc,.ok
+        ld a,0xF0                       ; below the screen: back to the top
+.ok:    dec hl
+        dec hl
+        ld (hl),a
+        add a,9
+        out (0x98),a
+        inc hl
+        inc hl
+        inc hl
+        ld a,d
+        add a,(hl)
+        dec hl
+        dec hl
+        ld (hl),a
+        out (0x98),a
+        inc hl
+        inc hl
+        inc hl
+        inc hl
+        ld a,c
+        and 1
+        add a,4
+        out (0x98),a
+        inc c
+        xor a
+        out (0x98),a
+        djnz .s
+        ld a,0xD8
+        out (0x98),a
+        jp curs_z
+
+
+; ---- the music: the menu song in the menus, the puzzle music (PM.wav, the whole track) while a puzzle or the memory game is played (silent in the attract mode)
+mus_puzzle:
+        ld a,(g_mute)
+        or a
+        ret nz
+        ld a,1
+        ld (g_trk),a
+        ld hl,PUZ0
+        ld de,PUZ0 + PUZN
+        call au_play
+        ret
+
+mus_menu:
+        ld a,(g_trk)
+        or a
+        ret z
+        xor a
+        ld (g_trk),a
+        ld a,(g_mute)
+        or a
+        ret nz
+        ld hl,AUD0
+        ld de,AUD0 + AUDN
+        call au_play
+        ret
+
+; rnd_seed: the clock (all of the RTC: time and date) and the timer into the seed: what is picked differs every time (the attract mode, the thumbnail, the puzzle, the cards)
+rnd_seed:
+        ld a,13                         ; the RTC mode register: block 0, timer on (the BIOS does the same)
+        out (0xB4),a
+        ld a,8
+        out (0xB5),a
+        ld hl,(g_rng)
+        ld de,(smp)
+        add hl,de
+        ld c,12
+.r:     ld a,c                          ; the 13 registers of the RTC: seconds, minutes, hours, weekday, day, month, year
+        out (0xB4),a
+        in a,(0xB5)
+        xor l
+        rlca
+        ld l,a
+        add a,h
+        ld h,a
+        dec c
+        jp p,.r
+        in a,(0xE6)                     ; and the timer
+        xor h
+        ld h,a
+        or l
+        jr nz,.s
+        inc hl
+.s:     ld (g_rng),hl
+        ret
+
+; au_play: HL = the first bank, DE = the end bank of the music that plays now (the loop), from its start
+au_play:
+        ld (au_bank),hl
+        ld (au_start),hl
+        ld (au_end),de
+        ld a,l
+        ld (0x7000),a
+        ld a,h
+        ld (0x7001),a
+        ld hl,0x8000
+        ld (au_ptr),hl
+        ret
+
+;;ENDATT

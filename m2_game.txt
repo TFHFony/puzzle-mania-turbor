@@ -1,0 +1,705 @@
+
+; ================================================================================================ the game: sliding puzzle in SCREEN 11
+; The photo is in page 1 of the VRAM (y = 256 ...) as the picture to look at (H: the display switches to page 1) and as the source of the tiles; page 0 holds the board.
+GV      equ 0xF168
+board   equ GV                          ; 36 bytes: the tile on every cell (the tile n*n-1 is the gap)
+g_n     equ GV + 40
+g_gx    equ GV + 41
+g_gy    equ GV + 42
+g_tw    equ GV + 43
+g_th    equ GV + 44
+g_state equ GV + 45                     ; 0 playing, 1 solved
+g_hold  equ GV + 46                     ; H is down
+g_moves equ GV + 48
+g_secs  equ GV + 50
+g_snext equ GV + 52
+g_poll  equ GV + 54
+g_rng   equ GV + 56
+k_8     equ GV + 58
+k_8o    equ GV + 59
+k_0     equ GV + 60
+k_0o    equ GV + 61
+k_3     equ GV + 62
+k_3o    equ GV + 63
+hm_sx   equ GV + 64
+hm_sy   equ GV + 66
+hm_dx   equ GV + 68
+hm_dy   equ GV + 70
+hm_nx   equ GV + 72
+hm_ny   equ GV + 74
+hm_clr  equ GV + 76
+hm_cmd  equ GV + 77
+g_dx    equ GV + 78
+g_dy    equ GV + 79
+g_sc    equ GV + 80                     ; the source cell of a move (column, row)
+g_sr    equ GV + 81
+g_tile  equ GV + 82
+g_i     equ GV + 83
+g_col   equ GV + 84
+g_row   equ GV + 85
+g_cn16  equ GV + 348                    ; (word) shuffle moves left
+g_plast equ GV + 350
+g_ox    equ GV + 108                    ; the origin of the board: x, y
+g_oy    equ GV + 109
+
+main:   ld sp,0xF300
+        ld hl,0xC000                    ; variables and queue start at 0
+        ld de,0xC001
+        ld bc,0x00FF
+        ld (hl),0
+        ldir
+        ld hl,GV                        ; the game variables
+        ld de,GV + 1
+        ld bc,0x00FF
+        ld (hl),0
+        ldir
+        ld hl,AUD0                      ; the audio: bank AUD0 in the window of page 2
+        ld (au_bank),hl
+        ld a,l
+        ld (0x7000),a
+        ld a,h
+        ld (0x7001),a
+        ld hl,0x8000
+        ld (au_ptr),hl
+        in a,(0xE6)
+        ld (tgt),a
+        ; the photo into page 1 of the VRAM (addresses 10000h ...): 4 stream jobs
+        ld hl,PHOTO0
+        ld (e_buf + 1),hl
+        xor a
+        ld (g_i),a
+.ph:    ld a,1
+        ld (e_buf),a
+        ld hl,0x4000
+        ld (e_buf + 3),hl
+        ld hl,16384
+        ld (e_buf + 5),hl
+        ld a,(g_i)
+        add a,4                         ; R#14 = 4 + part: A16 = 1
+        ld (e_buf + 7),a
+        xor a
+        ld (e_buf + 8),a
+        ld a,0x40
+        ld (e_buf + 9),a
+        ld hl,e_buf
+        call q_put
+        ld hl,(e_buf + 1)
+        inc hl
+        ld (e_buf + 1),hl
+        ld a,(g_i)
+        inc a
+        ld (g_i),a
+        cp 4
+        jr nz,.ph
+        call wait_idle
+        ld hl,0x7A11
+        ld (g_rng),hl
+        ld hl,0                         ; the whole of page 0 black
+        ld (hm_dx),hl
+        ld (hm_dy),hl
+        ld hl,256
+        ld (hm_nx),hl
+        ld hl,212
+        ld (hm_ny),hl
+        xor a
+        ld (hm_clr),a
+        ld a,0xC0                       ; HMMV
+        ld (hm_cmd),a
+        call cmd_put
+        ld a,4
+        call newgame
+        ld hl,(smp)
+        ld de,15980
+        add hl,de
+        ld (g_snext),hl
+.loop:  call tick
+        ld hl,(smp)
+        ld de,(g_poll)
+        or a
+        sbc hl,de
+        bit 7,h
+        jr nz,.nk
+        call keys
+        ld hl,(g_poll)
+        ld de,200
+        add hl,de
+        ld (g_poll),hl
+.nk:    ld hl,(smp)
+        ld de,(g_snext)
+        or a
+        sbc hl,de
+        bit 7,h
+        jr nz,.loop
+        ld hl,(g_snext)
+        ld de,15980
+        add hl,de
+        ld (g_snext),hl
+        ld a,(g_state)
+        or a
+        jr nz,.loop
+        ld hl,(g_secs)
+        inc hl
+        ld (g_secs),hl
+        call hud_time
+        jr .loop
+
+; ---- the commands: HMMM (copy) and HMMV (fill) from hm_* (+ a wait for the end)
+cmd_put:
+        call tick
+        ld a,3
+        ld (e_buf),a
+        ld hl,(hm_sx)
+        ld (e_buf + 1),hl
+        ld hl,(hm_sy)
+        ld (e_buf + 3),hl
+        ld hl,(hm_dx)
+        ld (e_buf + 5),hl
+        ld hl,(hm_dy)
+        ld (e_buf + 7),hl
+        call tick
+        ld hl,(hm_nx)
+        ld (e_buf + 9),hl
+        ld hl,(hm_ny)
+        ld (e_buf + 11),hl
+        ld a,(hm_clr)
+        ld (e_buf + 13),a
+        xor a
+        ld (e_buf + 14),a
+        ld a,(hm_cmd)
+        ld (e_buf + 15),a
+        call tick
+        ld hl,e_buf
+        call q_put
+        ld a,4                          ; wait for the end
+        ld (e_buf),a
+        ld hl,e_buf
+        jp q_put
+
+setreg: ld (e_buf + 1),a                ; A = value, C = register: a job
+        ld a,c
+        ld (e_buf + 2),a
+        ld a,5
+        ld (e_buf),a
+        ld hl,e_buf
+        jp q_put
+
+; ---- geometry
+xpix:   ld hl,0                         ; A = column -> HL = x origin + column * tile width
+        or a
+        jr z,.z
+        ld b,a
+        ld a,(g_tw)
+        ld e,a
+        ld d,0
+.l:     add hl,de
+        djnz .l
+.z:     ld a,(g_ox)
+        ld e,a
+        ld d,0
+        add hl,de
+        ret
+ypix:   ld hl,0                         ; A = row -> HL = y origin + row * tile height
+        or a
+        jr z,.z
+        ld b,a
+        ld a,(g_th)
+        ld e,a
+        ld d,0
+.l:     add hl,de
+        djnz .l
+.z:     ld a,(g_oy)
+        ld e,a
+        ld d,0
+        add hl,de
+        ret
+
+; ---- a new game: A = size 3..6
+newgame:
+        ld (g_n),a
+        xor a
+        ld (g_nsh),a
+        ld a,(g_pdirty)
+        or a
+        call nz,load_pic
+        ld hl,(smp)                     ; (the seed of the shuffle changes with the time)
+        ld de,(g_rng)
+        add hl,de
+        ld a,h
+        or l
+        jr nz,.sd
+        inc hl
+.sd:    ld (g_rng),hl
+        ld a,(g_n)
+        sub 3
+        ld e,a
+        ld d,0
+        ld hl,tw_tab
+        add hl,de
+        ld a,(hl)
+        ld (g_tw),a
+        ld hl,th_tab
+        add hl,de
+        ld a,(hl)
+        ld (g_th),a
+        ld hl,ox_tab
+        add hl,de
+        ld a,(hl)
+        ld (g_ox),a
+        ld hl,oy_tab
+        add hl,de
+        ld a,(hl)
+        ld (g_oy),a
+        ld a,(g_n)                      ; the board: tile i on cell i, the gap at the bottom right
+        ld b,a
+        ld a,0
+        call mulnn                      ; (A, B unused here) -> C = n * n
+        ld hl,board
+        ld b,0
+.id:    ld (hl),b
+        inc hl
+        inc b
+        ld a,b
+        cp c
+        jr nz,.id
+        ld a,(g_n)
+        dec a
+        ld (g_gx),a
+        ld (g_gy),a
+        ld hl,MLOG                      ; the shuffle like the original: random moves of the gap, never straight back, only moves that happen count:
+        ld (g_lp),hl                    ; 12 * n * n moves (the attract mode: 35 for 3x3, 60 for 4x4; its moves are logged to be undone)
+        ld a,(g_att)
+        or a
+        jr z,.norm
+        ld a,(g_shn)
+        ld l,a
+        ld h,0
+        jr .cnt
+.norm:  call mulnn
+        ld l,c
+        ld h,0
+        ld d,h
+        ld e,l
+        add hl,hl
+        add hl,de
+        add hl,hl
+        add hl,hl
+.cnt:   ld (g_cn16),hl
+        ld a,0xFF
+        ld (g_plast),a
+.sh:    call tick
+        call rnd
+        and 3
+        ld b,a
+        ld a,(g_plast)
+        xor 1
+        cp b
+        jr z,.sh
+        ld a,(g_gx)
+        ld d,a
+        ld a,(g_gy)
+        ld e,a
+        push de
+        ld a,b
+        call shufmove
+        pop de
+        ld a,(g_gx)
+        cp d
+        jr nz,.mv
+        ld a,(g_gy)
+        cp e
+        jr z,.sh
+.mv:    ld a,(g_dir)
+        ld (g_plast),a
+        ld hl,(g_cn16)
+        dec hl
+        ld (g_cn16),hl
+        ld a,h
+        or l
+        jr nz,.sh
+        ld hl,0
+        ld (g_moves),hl
+        ld (g_secs),hl
+        xor a
+        ld (g_state),a
+        call puz_lines
+        call render
+        ld hl,(smp)
+        ld de,15980
+        add hl,de
+        ld (g_snext),hl
+        ld a,(g_ctl)
+        or a
+        jp nz,puz_ctl_init
+        ret
+; the geometry of the original (192 lines, 10 lines down): 3x3 240 x 192, 4x4 256 x 192, 5x5 240 x 160, 6x6 240 x 192
+tw_tab: db 80, 64, 48, 40
+th_tab: db 64, 48, 32, 32
+ox_tab: db 8, 0, 8, 8
+oy_tab: db 10, 10, 26, 10
+
+mulnn:  ld a,(g_n)                      ; C = n * n
+        ld c,a
+        ld b,a
+        xor a
+.l:     add a,c
+        djnz .l
+        ld c,a
+        ret
+
+rnd:    ld hl,(g_rng)                   ; 16 bit xorshift, A = a random byte
+        ld a,h
+        rra
+        ld a,l
+        rra
+        xor h
+        ld h,a
+        ld a,l
+        rra
+        ld a,h
+        rra
+        xor l
+        ld l,a
+        xor h
+        ld h,a
+        ld (g_rng),hl
+        ret
+
+; shufmove: A = direction 0..3 (right, left, down, up): the gap swaps with its neighbour in the RAM
+shufmove:
+        ld b,a
+        ld a,(g_gx)
+        ld d,a
+        ld a,(g_gy)
+        ld e,a                          ; D = gap column, E = gap row
+        ld a,b
+        or a
+        jr nz,.n1
+        inc d                           ; right
+        jr .ck
+.n1:    dec a
+        jr nz,.n2
+        dec d                           ; left
+        jr .ck
+.n2:    dec a
+        jr nz,.n3
+        inc e                           ; down
+        jr .ck
+.n3:    dec e                           ; up
+.ck:    ld a,(g_n)
+        ld c,a
+        ld a,d
+        cp c
+        ret nc                          ; (a negative column wraps round to a big number)
+        ld a,e
+        cp c
+        ret nc
+        ; swap board[gap] with board[D, E]
+        push de
+        ld a,(g_gy)
+        ld e,a
+        ld a,(g_gx)
+        ld d,a
+        call cellidx                    ; HL = &board[gap]
+        push hl
+        pop ix
+        pop de
+        call cellidx
+        ld a,(hl)
+        ld b,(ix + 0)
+        ld (ix + 0),a
+        ld (hl),b
+        ld a,d
+        ld (g_gx),a
+        ld a,e
+        ld (g_gy),a
+        ret
+
+cellidx: ld a,(g_n)                     ; D = column, E = row -> HL = &board[row * n + column]
+        ld b,e
+        ld c,a
+        xor a
+        inc b
+.m:     dec b
+        jr z,.d
+        add a,c
+        jr .m
+.d:     add a,d
+        ld l,a
+        ld h,0
+        ld bc,board
+        add hl,bc
+        ret
+
+; ---- the board on the screen: every cell is copied from the picture in page 1 (or filled black when it is the gap)
+render: xor a
+        ld (g_i),a
+.cell:  call tick
+        ld a,(g_i)
+        ld c,a
+        ld a,(g_n)
+        ld d,a
+        ld a,c
+        ld b,0
+.dv:    cp d
+        jr c,.dd
+        sub d
+        inc b
+        jr .dv
+.dd:    ld (g_col),a                    ; the cell: column A, row B
+        ld a,b
+        ld (g_row),a
+        ld a,(g_col)
+        call xpix
+        ld (hm_dx),hl
+        ld a,(g_row)
+        call ypix
+        ld (hm_dy),hl
+        ld hl,board
+        ld a,(g_i)
+        ld e,a
+        ld d,0
+        add hl,de
+        ld a,(hl)                       ; the tile
+        ld (g_tile),a
+        call mulnn
+        dec c                           ; the gap is the tile n * n - 1
+        ld a,(g_tile)
+        cp c
+        jr z,.gap
+        ld c,a                          ; the place of that tile in the picture: column = tile mod n, row = tile div n
+        ld a,(g_n)
+        ld d,a
+        ld a,c
+        ld b,0
+.d2:    cp d
+        jr c,.d3
+        sub d
+        inc b
+        jr .d2
+.d3:    push bc
+        call xpix
+        ld (hm_sx),hl
+        pop bc
+        ld a,b
+        call ypix
+        ld de,256                       ; (page 1: y + 256: the picture lies where the board is)
+        add hl,de
+        ld (hm_sy),hl
+        call tiledim
+        ld a,0xD0                       ; HMMM
+        ld (hm_cmd),a
+        jr .go
+.gap:   call tiledim
+        xor a
+        ld (hm_clr),a
+        ld a,0xC0                       ; HMMV
+        ld (hm_cmd),a
+.go:    call cmd_put
+        ld a,(g_i)
+        inc a
+        ld (g_i),a
+        ld c,a
+        call mulnn
+        ld a,(g_i)
+        cp c
+        jp nz,.cell
+        ret
+tiledim: ld a,(g_tw)
+        ld l,a
+        ld h,0
+        ld (hm_nx),hl
+        ld a,(g_th)
+        ld l,a
+        ld h,0
+        ld (hm_ny),hl
+        ret
+
+; ---- a move: the tile next to the gap slides into it.  A = direction 0..3 (right, left, down, up) of the key
+domove: call hint_chk
+        ld b,a
+        ld a,(g_gx)
+        ld d,a
+        ld a,(g_gy)
+        ld e,a
+        ld a,b                          ; the tile that moves is on the opposite side of the arrow: key right -> the tile left of the gap
+        or a
+        jr nz,.n1
+        dec d
+        jr .ck
+.n1:    dec a
+        jr nz,.n2
+        inc d
+        jr .ck
+.n2:    dec a
+        jr nz,.n3
+        dec e
+        jr .ck
+.n3:    inc e
+.ck:    ld a,(g_n)
+        ld c,a
+        ld a,d
+        cp c
+        ret nc
+        ld a,e
+        cp c
+        ret nc
+        ld a,d
+        ld (g_sc),a
+        ld a,e
+        ld (g_sr),a
+        ; the pictures: copy the source cell on the screen to the gap cell, then fill the source cell black
+        ld a,(g_sc)
+        call xpix
+        ld (hm_sx),hl
+        ld a,(g_sr)
+        call ypix
+        ld (hm_sy),hl
+        ld a,(g_gx)
+        call xpix
+        ld (hm_dx),hl
+        ld a,(g_gy)
+        call ypix
+        ld (hm_dy),hl
+        call tiledim
+        ld a,0xD0
+        ld (hm_cmd),a
+        call cmd_put
+        ld hl,(hm_sx)                   ; the source cell is the new gap: black
+        ld (hm_dx),hl
+        ld hl,(hm_sy)
+        ld (hm_dy),hl
+        xor a
+        ld (hm_clr),a
+        ld a,0xC0
+        ld (hm_cmd),a
+        call cmd_put
+        ld a,(g_sc)                     ; the board in the RAM
+        ld d,a
+        ld a,(g_sr)
+        ld e,a
+        call cellidx
+        push hl
+        pop ix
+        ld a,(g_gx)
+        ld d,a
+        ld a,(g_gy)
+        ld e,a
+        call cellidx
+        ld a,(ix + 0)
+        ld b,(hl)
+        ld (hl),a
+        ld (ix + 0),b
+        ld a,(g_sc)
+        ld (g_gx),a
+        ld a,(g_sr)
+        ld (g_gy),a
+        ld hl,(g_moves)
+        inc hl
+        ld (g_moves),hl
+        call hud_moves
+        ; solved?
+        call mulnn
+        ld hl,board
+        ld b,0
+.sv:    ld a,(hl)
+        cp b
+        ret nz
+        inc hl
+        inc b
+        ld a,b
+        cp c
+        jr nz,.sv
+        ld a,1
+        ld (g_state),a
+        ld hl,s_solved
+        ld e,8
+        ld d,203
+        jp prtstr
+
+; ---- the HUD (the bottom line): MOVES nnn   TIME nnn   3-6 SIZE  H SOLUTION
+s_hud:  db "MOVES 000  TIME 000  3-6 H",0
+s_solved: db "SOLVED!  SPACE = NEW GAME   ",0
+
+; ---- the keyboard: the matrix rows 8 (cursor keys, SPACE), 0 (3..6), 3 (H) read directly; every new press acts
+keys:   ld a,(k_8)
+        ld (k_8o),a
+        ld a,(k_0)
+        ld (k_0o),a
+        ld a,(k_3)
+        ld (k_3o),a
+        ld c,8
+        call rdrow
+        ld (k_8),a
+        ld c,0
+        call rdrow
+        ld (k_0),a
+        ld c,3
+        call rdrow
+        ld (k_3),a
+        call tick
+        ld a,(k_8o)                     ; new presses = now and not before
+        cpl
+        ld b,a
+        ld a,(k_8)
+        and b
+        ld d,a                          ; D = the new presses of row 8
+        ld a,(g_state)
+        or a
+        jr nz,.solved
+        bit 7,d
+        ld a,0
+        jp nz,domove                    ; right
+        bit 4,d
+        ld a,1
+        jp nz,domove                    ; left
+        bit 6,d
+        ld a,2
+        jp nz,domove                    ; down
+        bit 5,d
+        ld a,3
+        jp nz,domove                    ; up
+        jr .sizes
+.solved: bit 0,d
+        jr z,.sizes
+        ld a,(g_n)
+        jp newgame
+.sizes: ld a,(k_0o)
+        cpl
+        ld b,a
+        ld a,(k_0)
+        and b
+        ld d,a
+        ld a,3
+        bit 3,d
+        jp nz,newgame
+        inc a
+        bit 4,d
+        jp nz,newgame
+        inc a
+        bit 5,d
+        jp nz,newgame
+        inc a
+        bit 6,d
+        jp nz,newgame
+        ld a,(k_3)                      ; H: the picture (page 1) while the key is down
+        and 0x20
+        ld b,a
+        ld a,(g_hold)
+        cp b
+        ret z
+        ld a,b
+        ld (g_hold),a
+        or a
+        ld a,0x1F                       ; R#2: page 0
+        jr z,.pg
+        ld a,0x3F                       ; page 1
+.pg:    ld c,2
+        jp setreg
+
+rdrow:  in a,(0xAA)                     ; C = row -> A = the keys that are down (1 = down)
+        and 0xF0
+        or c
+        out (0xAA),a
+        in a,(0xA9)
+        cpl
+        ret
